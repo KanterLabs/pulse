@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist gettext-domain="pulse">
+  <schema id="org.gnome.shell.extensions.pulse" path="/org/gnome/shell/extensions/pulse/">
+    <key name="show-indicator" type="b">
+      <default>true</default>
+      <summary>Show the Pulse panel indicator</summary>
+      <description>Keep the Pulse music controls available from the GNOME top bar.</description>
+    </key>
+    <key name="show-progress" type="b">
+      <default>true</default>
+      <summary>Show playback progress</summary>
+      <description>Show elapsed and remaining time in the Pulse popover.</description>
+    </key>
+    <key name="compact-mode" type="b">
+      <default>false</default>
+      <summary>Use compact controls</summary>
+      <description>Reduce the spacing around playback controls.</description>
+    </key>
+    <key name="theme" type="s">
+      <default>'system'</default>
+      <summary>Popover theme</summary>
+      <description>Follow the desktop color scheme, or choose a light or dark appearance.</description>
+    </key>
+    <key name="shortcut-enabled" type="b">
+      <default>true</default>
+      <summary>Enable the keyboard shortcut</summary>
+      <description>Allow the configured shortcut to open or close the Pulse popover.</description>
+    </key>
+    <key name="toggle-shortcut" type="as">
+      <default>['&lt;Super&gt;&lt;Alt&gt;p']</default>
+      <summary>Toggle Pulse shortcut</summary>
+      <description>Keyboard accelerator used to open or close Pulse.</description>
+    </key>
+    <key name="default-view" type="s">
+      <default>'home'</default>
+      <summary>Default popover view</summary>
+      <description>View shown when the Pulse popover is opened.</description>
+    </key>
+  </schema>
+</schemalist>

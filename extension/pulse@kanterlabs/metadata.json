@@ -1,0 +1,9 @@
+{
+  "uuid": "pulse@kanterlabs",
+  "name": "Pulse",
+  "description": "A calm GNOME companion for controlling the official Spotify desktop client.",
+  "version": 1,
+  "shell-version": ["45", "46", "47", "48", "49"],
+  "settings-schema": "org.gnome.shell.extensions.pulse",
+  "url": "https://github.com/KanterLabs/pulse"
+}
