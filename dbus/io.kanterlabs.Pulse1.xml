@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<node name="/io/kanterlabs/Pulse">
+  <interface name="io.kanterlabs.Pulse1">
+    <property name="Status" type="s" access="read"/>
+    <property name="Playback" type="s" access="read"/>
+    <property name="ActiveView" type="s" access="read"/>
+    <property name="Offline" type="b" access="read"/>
+    <property name="LastRefresh" type="x" access="read"/>
+
+    <method name="Health">
+      <arg name="health_json" type="s" direction="out"/>
+    </method>
+    <method name="GetSnapshot">
+      <arg name="snapshot_json" type="s" direction="out"/>
+    </method>
+    <method name="Refresh"/>
+    <method name="Search">
+      <arg name="query" type="s" direction="in"/>
+      <arg name="results_json" type="s" direction="out"/>
+    </method>
+    <method name="OpenUri">
+      <arg name="uri" type="s" direction="in"/>
+    </method>
+    <method name="PlayPause"/>
+    <method name="Next"/>
+    <method name="Previous"/>
+    <method name="Seek">
+      <arg name="position_us" type="x" direction="in"/>
+    </method>
+    <method name="BeginLogin">
+      <arg name="authorization_url" type="s" direction="out"/>
+    </method>
+    <method name="Logout"/>
+
+    <signal name="SnapshotChanged">
+      <arg name="snapshot_json" type="s"/>
+    </signal>
+    <signal name="PlaybackChanged">
+      <arg name="snapshot_json" type="s"/>
+    </signal>
+    <signal name="LoginStateChanged">
+      <arg name="authenticated" type="b"/>
+    </signal>
+    <signal name="ErrorChanged">
+      <arg name="code" type="s"/>
+      <arg name="message" type="s"/>
+    </signal>
+  </interface>
+</node>
