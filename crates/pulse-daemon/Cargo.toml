@@ -1,0 +1,37 @@
+[package]
+name = "pulse-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Per-user Pulse daemon for GNOME and Spotify MPRIS integration"
+
+[lib]
+name = "pulse_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pulse-daemon"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.22"
+rand = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["backup", "bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+toml = "0.8"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+zbus = { version = "5", features = ["tokio"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
