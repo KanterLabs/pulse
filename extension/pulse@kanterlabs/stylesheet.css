@@ -1,0 +1,387 @@
+/* Pulse uses a small, self-contained palette so the popover remains legible
+ * in both GNOME's light and dark appearances.  The theme class is selected at
+ * runtime from org.gnome.desktop.interface when the preference is "system". */
+.pulse-popover {
+    -st-natural-width: 372px;
+    padding: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 18px;
+    background-color: rgba(30, 30, 34, 0.98);
+    color: #f4f4f6;
+}
+
+.pulse-popover.pulse-theme-dark {
+    background-color: rgba(30, 30, 34, 0.98);
+    color: #f4f4f6;
+}
+
+.pulse-popover.pulse-theme-light {
+    border-color: rgba(0, 0, 0, 0.12);
+    background-color: rgba(250, 250, 251, 0.98);
+    color: #242428;
+}
+
+.pulse-panel-box {
+    spacing: 2px;
+    padding: 0 2px;
+}
+
+.pulse-panel-icon {
+    icon-size: 16px;
+}
+
+.pulse-panel-dot {
+    width: 5px;
+    height: 5px;
+    margin-top: 2px;
+    border-radius: 5px;
+    background-color: transparent;
+}
+
+.pulse-panel-dot.pulse-dot-active {
+    background-color: #8bd450;
+}
+
+.pulse-panel-dot.pulse-dot-playing {
+    background-color: #1ed760;
+}
+
+.pulse-panel-box.pulse-panel-offline .pulse-panel-icon {
+    opacity: 0.58;
+}
+
+.pulse-now-playing-item,
+.pulse-progress-item,
+.pulse-controls-item,
+.pulse-navigation-item,
+.pulse-page-item {
+    padding: 8px 10px;
+}
+
+.pulse-now-playing-row {
+    spacing: 12px;
+    min-height: 76px;
+}
+
+.pulse-artwork-frame {
+    width: 72px;
+    height: 72px;
+    border-radius: 10px;
+    background-color: rgba(255, 255, 255, 0.08);
+}
+
+.pulse-theme-light .pulse-artwork-frame {
+    background-color: rgba(0, 0, 0, 0.07);
+}
+
+.pulse-artwork {
+    icon-size: 72px;
+    border-radius: 10px;
+}
+
+.pulse-track-details {
+    spacing: 2px;
+    padding-top: 2px;
+}
+
+.pulse-status-label {
+    color: #a9a9b2;
+    font-size: 0.82em;
+}
+
+.pulse-status-label.pulse-status-offline {
+    color: #e5b96a;
+}
+
+.pulse-title-label {
+    color: #f4f4f6;
+    font-size: 1.12em;
+    font-weight: 700;
+}
+
+.pulse-artist-label {
+    color: #d0d0d5;
+    font-size: 0.94em;
+}
+
+.pulse-album-label {
+    color: #9b9ba4;
+    font-size: 0.82em;
+}
+
+.pulse-theme-light .pulse-status-label {
+    color: #67676f;
+}
+
+.pulse-theme-light .pulse-status-label.pulse-status-offline {
+    color: #9a5e00;
+}
+
+.pulse-theme-light .pulse-title-label {
+    color: #242428;
+}
+
+.pulse-theme-light .pulse-artist-label {
+    color: #515158;
+}
+
+.pulse-theme-light .pulse-album-label {
+    color: #74747c;
+}
+
+.pulse-progress-item {
+    padding-top: 0;
+    padding-bottom: 2px;
+}
+
+.pulse-progress-bar {
+    -barlevel-height: 4px;
+    -barlevel-background-color: rgba(255, 255, 255, 0.16);
+    -barlevel-active-background-color: #1ed760;
+    -barlevel-overdrive-color: #1ed760;
+}
+
+.pulse-theme-light .pulse-progress-bar {
+    -barlevel-background-color: rgba(0, 0, 0, 0.12);
+}
+
+.pulse-time-row {
+    padding-top: 4px;
+}
+
+.pulse-time-label {
+    color: #9b9ba4;
+    font-size: 0.76em;
+}
+
+.pulse-theme-light .pulse-time-label {
+    color: #74747c;
+}
+
+.pulse-controls {
+    spacing: 12px;
+    padding-bottom: 8px;
+}
+
+.pulse-control-button {
+    width: 40px;
+    height: 40px;
+    border-radius: 20px;
+    background-color: transparent;
+}
+
+.pulse-control-button:hover,
+.pulse-control-button:focus {
+    background-color: rgba(255, 255, 255, 0.10);
+}
+
+.pulse-control-button:insensitive {
+    opacity: 0.35;
+}
+
+.pulse-play-button {
+    width: 48px;
+    height: 48px;
+    border-radius: 24px;
+    background-color: #f4f4f6;
+}
+
+.pulse-play-button:hover,
+.pulse-play-button:focus {
+    background-color: #ffffff;
+}
+
+.pulse-play-button:insensitive {
+    background-color: rgba(255, 255, 255, 0.38);
+}
+
+.pulse-play-button .pulse-control-icon {
+    color: #242428;
+}
+
+.pulse-control-icon {
+    icon-size: 18px;
+    color: #f4f4f6;
+}
+
+.pulse-theme-light .pulse-control-button:hover,
+.pulse-theme-light .pulse-control-button:focus {
+    background-color: rgba(0, 0, 0, 0.08);
+}
+
+.pulse-theme-light .pulse-play-button {
+    background-color: #242428;
+}
+
+.pulse-theme-light .pulse-play-button:hover,
+.pulse-theme-light .pulse-play-button:focus {
+    background-color: #111114;
+}
+
+.pulse-theme-light .pulse-play-button .pulse-control-icon {
+    color: #ffffff;
+}
+
+.pulse-theme-light .pulse-control-icon {
+    color: #242428;
+}
+
+.pulse-open-button {
+    min-height: 32px;
+    border-radius: 8px;
+    background-color: rgba(255, 255, 255, 0.09);
+    color: #f4f4f6;
+    font-weight: 600;
+}
+
+.pulse-open-button:hover,
+.pulse-open-button:focus {
+    background-color: rgba(255, 255, 255, 0.16);
+}
+
+.pulse-theme-light .pulse-open-button {
+    background-color: rgba(0, 0, 0, 0.07);
+    color: #242428;
+}
+
+.pulse-theme-light .pulse-open-button:hover,
+.pulse-theme-light .pulse-open-button:focus {
+    background-color: rgba(0, 0, 0, 0.12);
+}
+
+.pulse-navigation {
+    spacing: 2px;
+}
+
+.pulse-nav-button {
+    min-height: 52px;
+    padding: 5px 3px;
+    border-radius: 9px;
+    color: #a9a9b2;
+}
+
+.pulse-nav-button:hover,
+.pulse-nav-button:focus {
+    background-color: rgba(255, 255, 255, 0.08);
+    color: #f4f4f6;
+}
+
+.pulse-nav-button:checked {
+    background-color: rgba(30, 215, 96, 0.16);
+    color: #6fe69a;
+}
+
+.pulse-nav-icon {
+    icon-size: 15px;
+}
+
+.pulse-nav-label {
+    padding-top: 2px;
+    font-size: 0.76em;
+}
+
+.pulse-theme-light .pulse-nav-button {
+    color: #6d6d75;
+}
+
+.pulse-theme-light .pulse-nav-button:hover,
+.pulse-theme-light .pulse-nav-button:focus {
+    background-color: rgba(0, 0, 0, 0.07);
+    color: #242428;
+}
+
+.pulse-theme-light .pulse-nav-button:checked {
+    background-color: rgba(20, 140, 70, 0.13);
+    color: #087c3d;
+}
+
+.pulse-page-item {
+    padding-top: 10px;
+    padding-bottom: 12px;
+}
+
+.pulse-page-title {
+    color: #f4f4f6;
+    font-size: 1em;
+    font-weight: 700;
+}
+
+.pulse-page-body {
+    padding-top: 4px;
+    color: #a9a9b2;
+    font-size: 0.86em;
+}
+
+.pulse-theme-light .pulse-page-title {
+    color: #242428;
+}
+
+.pulse-theme-light .pulse-page-body {
+    color: #67676f;
+}
+
+.pulse-search-entry {
+    min-height: 34px;
+    margin-top: 10px;
+    padding: 0 10px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 8px;
+    background-color: rgba(255, 255, 255, 0.07);
+    color: #f4f4f6;
+}
+
+.pulse-search-entry:focus {
+    border-color: rgba(30, 215, 96, 0.72);
+}
+
+.pulse-theme-light .pulse-search-entry {
+    border-color: rgba(0, 0, 0, 0.15);
+    background-color: rgba(0, 0, 0, 0.04);
+    color: #242428;
+}
+
+.pulse-search-results {
+    spacing: 2px;
+    padding-top: 8px;
+}
+
+.pulse-result-button {
+    min-height: 42px;
+    padding: 4px 8px;
+    border-radius: 7px;
+}
+
+.pulse-result-button:hover,
+.pulse-result-button:focus {
+    background-color: rgba(255, 255, 255, 0.08);
+}
+
+.pulse-theme-light .pulse-result-button:hover,
+.pulse-theme-light .pulse-result-button:focus {
+    background-color: rgba(0, 0, 0, 0.07);
+}
+
+.pulse-result-title {
+    color: #f4f4f6;
+    font-size: 0.88em;
+}
+
+.pulse-result-subtitle,
+.pulse-search-message {
+    color: #9b9ba4;
+    font-size: 0.78em;
+}
+
+.pulse-theme-light .pulse-result-title {
+    color: #242428;
+}
+
+.pulse-theme-light .pulse-result-subtitle,
+.pulse-theme-light .pulse-search-message {
+    color: #74747c;
+}
+
+.pulse-compact-controls .pulse-controls {
+    spacing: 7px;
+    padding-bottom: 3px;
+}
