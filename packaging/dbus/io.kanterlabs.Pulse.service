@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=io.kanterlabs.Pulse
+# install-user.sh replaces the portable %h path with the resolved executable.
+Exec="%h/.local/bin/pulse-daemon"
+SystemdService=pulse-daemon.service
