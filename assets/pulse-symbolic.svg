@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="16"
+     height="16"
+     viewBox="0 0 16 16"
+     role="img"
+     aria-labelledby="pulse-symbolic-title pulse-symbolic-description"
+     focusable="false">
+  <title id="pulse-symbolic-title">Pulse</title>
+  <desc id="pulse-symbolic-description">Monochrome heartbeat waveform.</desc>
+  <!-- GNOME symbolic icons use one solid theme-recolorable color. -->
+  <path d="M1.5 8h2.3l1.3-3.35 1.7 6.7 1.7-8.1 1.65 5.55H14.5"
+        fill="none"
+        stroke="#2e3436"
+        stroke-width="1.7"
+        stroke-linecap="round"
+        stroke-linejoin="round"/>
+</svg>
