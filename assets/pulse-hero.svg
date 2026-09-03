@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200"
+     height="360"
+     viewBox="0 0 1200 360"
+     role="img"
+     aria-labelledby="pulse-hero-title pulse-hero-description"
+     focusable="false">
+  <title id="pulse-hero-title">Pulse</title>
+  <desc id="pulse-hero-description">A calm GNOME command-center banner built around a heartbeat waveform.</desc>
+
+  <rect width="1200" height="360" rx="40" fill="#0e201b"/>
+  <rect x="18" y="18" width="1164" height="324" rx="34"
+        fill="#14342b" stroke="#2f5b4b" stroke-width="3"/>
+
+  <!-- Compact app mark. -->
+  <rect x="70" y="70" width="220" height="220" rx="56" fill="#10231f" stroke="#2f5b4b" stroke-width="4"/>
+  <path d="M91 190h24c6 0 11-4 13-10l13-35c3-8 14-8 17 1l18 66c3 10 16 10 19-1l18-76c3-12 20-12 23 1l10 42c2 7 8 12 16 12h24"
+        fill="none"
+        stroke="#f4f7f2"
+        stroke-width="14"
+        stroke-linecap="round"
+        stroke-linejoin="round"/>
+  <path d="M176 146l11 65c2 12 17 12 20 1l18-76c3-12 20-12 23 1l10 42"
+        fill="none"
+        stroke="#86dfaa"
+        stroke-width="14"
+        stroke-linecap="round"
+        stroke-linejoin="round"/>
+  <circle cx="91" cy="190" r="7" fill="#86dfaa"/>
+  <circle cx="269" cy="190" r="7" fill="#86dfaa"/>
+
+  <!-- Quiet dashboard rhythm to the right of the mark. -->
+  <path d="M358 91h750M358 269h750" fill="none" stroke="#2f5b4b" stroke-width="2" opacity="0.6"/>
+  <path d="M358 180h750" fill="none" stroke="#3e715d" stroke-width="2" opacity="0.8"/>
+  <path d="M442 74v212M618 74v212M794 74v212M970 74v212" fill="none" stroke="#2b5144" stroke-width="2" opacity="0.45"/>
+
+  <path d="M382 180h57c10 0 18-6 22-16l22-58c4-11 20-11 24 1l30 108c4 14 22 14 26-1l30-122c4-16 27-16 31 1l17 68c3 11 12 19 24 19h48"
+        fill="none"
+        stroke="#f4f7f2"
+        stroke-width="12"
+        stroke-linecap="round"
+        stroke-linejoin="round"/>
+  <path d="M507 106l30 108c4 14 22 14 26-1l30-122c4-16 27-16 31 1l17 68"
+        fill="none"
+        stroke="#86dfaa"
+        stroke-width="12"
+        stroke-linecap="round"
+        stroke-linejoin="round"/>
+
+  <!-- Three simple status rails keep the banner useful without text glyphs. -->
+  <rect x="913" y="119" width="150" height="14" rx="7" fill="#86dfaa" opacity="0.9"/>
+  <rect x="913" y="151" width="96" height="10" rx="5" fill="#b8c9bf" opacity="0.75"/>
+  <rect x="913" y="231" width="128" height="14" rx="7" fill="#86dfaa" opacity="0.9"/>
+  <rect x="913" y="263" width="72" height="10" rx="5" fill="#b8c9bf" opacity="0.75"/>
+</svg>
