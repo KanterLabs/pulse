@@ -1,0 +1,22 @@
+[Unit]
+Description=Pulse Spotify companion daemon
+Documentation=https://github.com/KanterLabs/pulse
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+# install-user.sh replaces the portable %h path with the resolved executable.
+ExecStart="%h/.local/bin/pulse-daemon"
+Restart=on-failure
+RestartSec=2s
+Environment=PULSE_BUS_NAME=io.kanterlabs.Pulse
+# These defaults are replaced when an XDG override is supplied.
+Environment="XDG_CONFIG_HOME=%h/.config"
+Environment="XDG_DATA_HOME=%h/.local/share"
+Environment="XDG_CACHE_HOME=%h/.cache"
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target
