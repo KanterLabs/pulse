@@ -1,0 +1,215 @@
+name: Continuous integration
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+# This workflow intentionally uses the regular pull-request event only. It has
+# no secrets and cannot write repository contents, including for forked pull
+# requests. Build tools still run as an unprivileged runner user.
+permissions:
+  contents: read
+
+concurrency:
+  group: pulse-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  metadata:
+    name: Workspace metadata
+    runs-on: homelab
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Inspect Cargo metadata
+        run: cargo metadata --no-deps --format-version 1
+
+  rust-fmt:
+    name: Rust format
+    runs-on: homelab
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check Rust toolchain
+        run: |
+          rustc --version
+          cargo --version
+          rustup component add rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  static:
+    name: Shell and extension static checks
+    runs-on: homelab
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check shell syntax and style
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [[ ! -d scripts ]]; then
+            echo "No scripts directory; shell checks are not applicable yet."
+            exit 0
+          fi
+
+          mapfile -t shell_files < <(
+            find scripts -type f \( -name '*.sh' -o -name '*.bash' \) -print | sort
+          )
+          if (( ${#shell_files[@]} == 0 )); then
+            echo "No shell scripts found; shell checks are not applicable yet."
+            exit 0
+          fi
+
+          bash -n "${shell_files[@]}"
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            echo "::error::shellcheck is required on the homelab runner"
+            exit 1
+          fi
+          shellcheck --severity=warning --shell=bash "${shell_files[@]}"
+      - name: Validate extension JavaScript and data
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [[ ! -d extension ]]; then
+            echo "No extension directory; extension checks are not applicable yet."
+            exit 0
+          fi
+
+          mapfile -t js_files < <(find extension -type f -name '*.js' -print | sort)
+          if (( ${#js_files[@]} > 0 )); then
+            if command -v gjs >/dev/null 2>&1; then
+              for file in "${js_files[@]}"; do
+                gjs --check "$file"
+              done
+            elif command -v node >/dev/null 2>&1; then
+              for file in "${js_files[@]}"; do
+                node --check "$file"
+              done
+            else
+              echo "::warning::Neither gjs nor node is available; JavaScript syntax validation was skipped"
+            fi
+          fi
+
+          mapfile -t json_files < <(find extension -type f -name '*.json' -print | sort)
+          if (( ${#json_files[@]} > 0 )); then
+            python3 - "${json_files[@]}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          for value in sys.argv[1:]:
+              path = pathlib.Path(value)
+              with path.open(encoding="utf-8") as handle:
+                  json.load(handle)
+              print(f"validated JSON: {path}")
+          PY
+          fi
+
+          mapfile -t schema_dirs < <(find extension -type d -name schemas -print | sort)
+          for directory in "${schema_dirs[@]}"; do
+            if ! find "$directory" -maxdepth 1 -type f -name '*.gschema.xml' -print -quit | grep -q .; then
+              continue
+            fi
+            if command -v glib-compile-schemas >/dev/null 2>&1; then
+              glib-compile-schemas --strict --dry-run "$directory"
+            else
+              echo "::warning::glib-compile-schemas is unavailable; schema validation was skipped for $directory"
+            fi
+          done
+
+  rust-clippy:
+    name: Rust Clippy
+    runs-on: homelab-heavy
+    timeout-minutes: 30
+    env:
+      CARGO_HOME: ${{ runner.temp }}/cargo
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/cargo/registry
+            ${{ runner.temp }}/cargo/git
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-1.88-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-1.88-
+      - name: Check Rust toolchain
+        run: |
+          rustc --version
+          cargo --version
+          rustup component add clippy
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  rust-build:
+    name: Rust workspace build
+    runs-on: homelab-heavy
+    timeout-minutes: 30
+    env:
+      CARGO_HOME: ${{ runner.temp }}/cargo
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/cargo/registry
+            ${{ runner.temp }}/cargo/git
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-1.88-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-1.88-
+      - name: Build workspace
+        run: cargo build --workspace
+
+  rust-test:
+    name: Rust workspace tests
+    runs-on: homelab-heavy
+    timeout-minutes: 30
+    env:
+      CARGO_HOME: ${{ runner.temp }}/cargo
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/cargo/registry
+            ${{ runner.temp }}/cargo/git
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-1.88-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-1.88-
+      - name: Run workspace tests
+        run: cargo test --workspace
