@@ -7,8 +7,8 @@
 set -Eeuo pipefail
 
 PULSE_COMMON_CALLER=${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}
-PULSE_SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$PULSE_COMMON_CALLER")" && pwd -P)"
-PULSE_REPO_ROOT="$(CDPATH= cd -- "$PULSE_SCRIPT_DIR/.." && pwd -P)"
+PULSE_SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$PULSE_COMMON_CALLER")" && pwd -P)"
+PULSE_REPO_ROOT="$(CDPATH='' cd -- "$PULSE_SCRIPT_DIR/.." && pwd -P)"
 
 pulse_info() {
     printf 'pulse: %s\n' "$*"
@@ -291,9 +291,9 @@ pulse_assert_purge_target() {
     [[ "$parent" != '/' && "$parent" != "$HOME" ]] ||
         pulse_die "refusing to purge broad path: $path"
 
-    home_real=$(CDPATH= cd -- "$HOME" && pwd -P)
+    home_real=$(CDPATH='' cd -- "$HOME" && pwd -P)
     if [[ -e "$path" ]]; then
-        path_real=$(CDPATH= cd -- "$path" 2>/dev/null && pwd -P) ||
+        path_real=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd -P) ||
             pulse_die "cannot resolve purge target: $path"
         [[ "$path_real" != "$home_real" && "$path_real" != '/' ]] ||
             pulse_die "refusing to purge broad path: $path"
