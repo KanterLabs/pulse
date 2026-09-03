@@ -141,8 +141,6 @@ jobs:
     name: Rust Clippy
     runs-on: homelab-heavy
     timeout-minutes: 30
-    env:
-      CARGO_HOME: ${{ runner.temp }}/cargo
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -170,8 +168,6 @@ jobs:
     name: Rust workspace build
     runs-on: homelab-heavy
     timeout-minutes: 30
-    env:
-      CARGO_HOME: ${{ runner.temp }}/cargo
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -194,8 +190,6 @@ jobs:
     name: Rust workspace tests
     runs-on: homelab-heavy
     timeout-minutes: 30
-    env:
-      CARGO_HOME: ${{ runner.temp }}/cargo
     steps:
       - name: Check out source
         uses: actions/checkout@v4
