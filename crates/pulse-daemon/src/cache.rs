@@ -4,8 +4,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use reqwest::Client;
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
+use url::Url;
 
 use crate::error::{PulseError, Result};
 use crate::model::PlaybackSnapshot;
@@ -362,16 +364,89 @@ impl ArtworkCache {
     }
 
     pub fn get(&self, source_url: &str) -> Result<Option<Vec<u8>>> {
+        let Some(path) = self.cached_path(source_url)? else {
+            return Ok(None);
+        };
+        Ok(Some(std::fs::read(path)?))
+    }
+
+    /// Return the cached local file for a source URL, if it is present and within the configured
+    /// per-file limit. Invalid/oversized files are discarded so a partial download can never be
+    /// handed to the extension.
+    pub fn cached_path(&self, source_url: &str) -> Result<Option<PathBuf>> {
         let path = self.path_for(source_url);
         if !path.exists() {
             return Ok(None);
         }
         let metadata = std::fs::metadata(&path)?;
-        if metadata.len() > self.max_file_bytes as u64 {
+        if !metadata.is_file() || metadata.len() > self.max_file_bytes as u64 {
             std::fs::remove_file(path)?;
             return Ok(None);
         }
-        Ok(Some(std::fs::read(path)?))
+        Ok(Some(path))
+    }
+
+    /// Download an HTTPS artwork URL into the bounded content-addressed cache.
+    ///
+    /// Artwork is intentionally treated as opaque bytes: the daemon does not decode, resize,
+    /// recompress, or otherwise transform Spotify's image. A declared Content-Length is checked
+    /// before reading and the streamed body is bounded as well for servers that omit it.
+    pub async fn fetch(&self, client: &Client, source_url: &str) -> Result<PathBuf> {
+        let parsed = Url::parse(source_url)
+            .map_err(|error| PulseError::InvalidInput(format!("invalid artwork URL: {error}")))?;
+        if parsed.scheme() != "https" {
+            return Err(PulseError::InvalidInput(
+                "artwork downloads require HTTPS".into(),
+            ));
+        }
+        if let Some(path) = self.cached_path(source_url)? {
+            return Ok(path);
+        }
+
+        let mut response = client
+            .get(parsed)
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .await?;
+        // reqwest follows redirects by default. Never accept a redirected HTTP URL, even if the
+        // original Spotify artwork URL was HTTPS.
+        if response.url().scheme() != "https" {
+            return Err(PulseError::InvalidInput(
+                "artwork redirect did not remain on HTTPS".into(),
+            ));
+        }
+        if !response.status().is_success() {
+            return Err(PulseError::RetryExhausted {
+                attempts: 1,
+                message: format!("artwork request returned {}", response.status()),
+            });
+        }
+        if let Some(content_length) = response.content_length()
+            && content_length > self.max_file_bytes as u64
+        {
+            return Err(PulseError::PayloadTooLarge {
+                size: usize::try_from(content_length).unwrap_or(usize::MAX),
+                limit: self.max_file_bytes,
+            });
+        }
+
+        let mut bytes = Vec::with_capacity(
+            response
+                .content_length()
+                .and_then(|size| usize::try_from(size).ok())
+                .unwrap_or(0)
+                .min(self.max_file_bytes),
+        );
+        while let Some(chunk) = response.chunk().await? {
+            if bytes.len().saturating_add(chunk.len()) > self.max_file_bytes {
+                return Err(PulseError::PayloadTooLarge {
+                    size: bytes.len().saturating_add(chunk.len()),
+                    limit: self.max_file_bytes,
+                });
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        self.put(source_url, &bytes)
     }
 
     pub fn put(&self, source_url: &str, bytes: &[u8]) -> Result<PathBuf> {

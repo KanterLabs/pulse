@@ -148,9 +148,9 @@ impl MprisClient {
     pub async fn open_uri(&self, uri: &str) -> Result<()> {
         let parsed = url::Url::parse(uri)
             .map_err(|error| PulseError::InvalidInput(format!("invalid URI: {error}")))?;
-        if !matches!(parsed.scheme(), "spotify" | "http" | "https") {
+        if parsed.scheme() != "spotify" {
             return Err(PulseError::InvalidInput(
-                "only spotify, http, and https URIs are supported".into(),
+                "MPRIS URI routing only accepts spotify URIs".into(),
             ));
         }
         let player_name = self.require_player().await?;

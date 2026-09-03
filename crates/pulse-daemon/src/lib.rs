@@ -14,7 +14,9 @@ pub mod spotify;
 
 pub use cache::{ArtworkCache, CacheLimits, CacheRepository, CachedResponse, CachedSnapshot};
 pub use config::PulseConfig;
-pub use dbus_service::{BUS_NAME, DaemonState, INTERFACE, OBJECT_PATH, PulseDbus, serve};
+pub use dbus_service::{
+    BUS_NAME, DaemonState, INTERFACE, OBJECT_PATH, PulseDbus, emit_snapshot_update, serve,
+};
 pub use error::{PulseError, Result};
 pub use model::{HealthSnapshot, HealthStatus, PlaybackSnapshot, PlaybackStatus};
 pub use mpris::MprisClient;
