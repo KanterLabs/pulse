@@ -28,6 +28,10 @@ use crate::error::{PulseError, Result};
 const MAX_ATTEMPTS: u32 = 5;
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const CALLBACK_READ_LIMIT: usize = 16 * 1024;
+const API_RESPONSE_LIMIT: usize = 4 * 1024 * 1024;
+const TOKEN_RESPONSE_LIMIT: usize = 1024 * 1024;
+const ERROR_BODY_LIMIT: usize = 16 * 1024;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetryPolicy {
@@ -376,11 +380,26 @@ impl SpotifyClient {
             .await
     }
 
+    /// Return the user's saved tracks for one bounded page.
+    pub async fn saved_tracks(&self, limit: u8, offset: u32) -> Result<Value> {
+        let limit = limit.clamp(1, 50).to_string();
+        let offset = offset.to_string();
+        self.get_json_with_query("me/tracks", &[("limit", &limit), ("offset", &offset)])
+            .await
+    }
+
     pub async fn user_playlists(&self, limit: u8, offset: u32) -> Result<Value> {
         let limit = limit.clamp(1, 50).to_string();
         let offset = offset.to_string();
         self.get_json_with_query("me/playlists", &[("limit", &limit), ("offset", &offset)])
             .await
+    }
+
+    /// Return the current read-only queue. Spotify may reject this endpoint for an account or
+    /// development application; callers should expose that as a capability state rather than
+    /// treating it as a daemon failure.
+    pub async fn queue(&self) -> Result<Value> {
+        self.get_json("me/player/queue").await
     }
 
     pub async fn search(&self, query: &str, types: &str, limit: u8) -> Result<Value> {
@@ -417,6 +436,7 @@ impl SpotifyClient {
         let response = self
             .http
             .post(endpoint)
+            .timeout(REQUEST_TIMEOUT)
             .form(&[
                 ("grant_type", "authorization_code"),
                 ("code", code),
@@ -428,13 +448,15 @@ impl SpotifyClient {
             .await?;
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = read_text_prefix(response, ERROR_BODY_LIMIT)
+                .await
+                .unwrap_or_default();
             return Err(PulseError::AuthenticationFailed(format!(
                 "token exchange returned {status}: {}",
                 sanitize_error_body(&body)
             )));
         }
-        let token: TokenResponse = response.json().await?;
+        let token: TokenResponse = decode_json_bounded(response, TOKEN_RESPONSE_LIMIT).await?;
         let token = token.into_token_set();
         self.set_token(token.clone())?;
         Ok(token)
@@ -451,6 +473,7 @@ impl SpotifyClient {
         let response = self
             .http
             .post(endpoint)
+            .timeout(REQUEST_TIMEOUT)
             .form(&[
                 ("grant_type", "refresh_token"),
                 ("refresh_token", refresh_token.as_str()),
@@ -469,7 +492,7 @@ impl SpotifyClient {
                 response.status()
             )));
         }
-        let token: TokenResponse = response.json().await?;
+        let token: TokenResponse = decode_json_bounded(response, TOKEN_RESPONSE_LIMIT).await?;
         let mut token = token.into_token_set();
         if token.refresh_token.is_none() {
             token.refresh_token = Some(refresh_token);
@@ -500,6 +523,7 @@ impl SpotifyClient {
             let response = self
                 .http
                 .request(method.clone(), url.clone())
+                .timeout(REQUEST_TIMEOUT)
                 .bearer_auth(&token.access_token)
                 .send()
                 .await;
@@ -517,7 +541,7 @@ impl SpotifyClient {
             let status = response.status();
             if status.is_success() {
                 self.set_rate_limit_state(RateLimitState::Clear);
-                return Ok(response.json().await?);
+                return decode_json_bounded(response, API_RESPONSE_LIMIT).await;
             }
             if status == StatusCode::UNAUTHORIZED {
                 self.clear_token()?;
@@ -535,7 +559,9 @@ impl SpotifyClient {
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.parse::<u64>().ok())
                 .map(|seconds| Duration::from_secs(seconds).min(self.retry_policy.max_delay));
-            let body = response.text().await.unwrap_or_default();
+            let body = read_text_prefix(response, ERROR_BODY_LIMIT)
+                .await
+                .unwrap_or_default();
             if status == StatusCode::TOO_MANY_REQUESTS {
                 if body.contains("QUOTA_EXCEEDED") {
                     self.set_rate_limit_state(RateLimitState::QuotaExceeded);
@@ -611,6 +637,49 @@ fn parse_base_url(value: &str, label: &str) -> Result<Url> {
     Ok(url)
 }
 
+async fn decode_json_bounded<T: DeserializeOwned>(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<T> {
+    if let Some(length) = response.content_length()
+        && length > limit as u64
+    {
+        return Err(PulseError::PayloadTooLarge {
+            size: usize::try_from(length).unwrap_or(usize::MAX),
+            limit,
+        });
+    }
+    let mut body = Vec::with_capacity(
+        response
+            .content_length()
+            .and_then(|length| usize::try_from(length).ok())
+            .unwrap_or(0)
+            .min(limit),
+    );
+    while let Some(chunk) = response.chunk().await? {
+        if body.len().saturating_add(chunk.len()) > limit {
+            return Err(PulseError::PayloadTooLarge {
+                size: body.len().saturating_add(chunk.len()),
+                limit,
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(serde_json::from_slice(&body)?)
+}
+
+async fn read_text_prefix(mut response: reqwest::Response, limit: usize) -> Result<String> {
+    let mut body = Vec::with_capacity(limit.min(1024));
+    while let Some(chunk) = response.chunk().await? {
+        let remaining = limit.saturating_sub(body.len());
+        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        if body.len() == limit {
+            break;
+        }
+    }
+    Ok(String::from_utf8_lossy(&body).into_owned())
+}
+
 fn parse_retry_after(body: &str, cap: Duration) -> Duration {
     // Spotify returns a Retry-After response header. The request layer consumes the body here,
     // so also accept the documented JSON form in test servers and future API responses.
@@ -625,7 +694,11 @@ fn parse_retry_after(body: &str, cap: Duration) -> Duration {
 fn sanitize_error_body(body: &str) -> String {
     let body = body.trim();
     if body.len() > 240 {
-        body[..240].to_owned()
+        let end = (0..=240)
+            .rev()
+            .find(|index| body.is_char_boundary(*index))
+            .unwrap_or(0);
+        body[..end].to_owned()
     } else {
         body.to_owned()
     }
@@ -693,7 +766,11 @@ impl PkceLogin {
             .map_err(|_| PulseError::AuthenticationFailed("login callback timed out".into()))??;
         let mut stream = accepted.0;
         let mut request = vec![0_u8; CALLBACK_READ_LIMIT];
-        let bytes_read = stream.read(&mut request).await?;
+        let bytes_read = timeout(Duration::from_secs(10), stream.read(&mut request))
+            .await
+            .map_err(|_| {
+                PulseError::AuthenticationFailed("login callback read timed out".into())
+            })??;
         let request = String::from_utf8_lossy(&request[..bytes_read]);
         let target = request
             .lines()
@@ -758,7 +835,9 @@ fn default_token_type() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{PkceLogin, RateLimitState, RetryPolicy, SpotifyClient, TokenSet};
+    use super::{
+        PkceLogin, RateLimitState, RetryPolicy, SpotifyClient, TokenSet, sanitize_error_body,
+    };
     use std::time::{Duration, SystemTime};
     use url::Url;
 
@@ -783,6 +862,12 @@ mod tests {
             .unwrap();
         assert!(!format!("{client:?}").contains("secret"));
         assert_eq!(client.rate_limit_state(), RateLimitState::Clear);
+    }
+
+    #[test]
+    fn error_body_truncation_preserves_utf8_boundaries() {
+        let input = format!("{}é", "x".repeat(239));
+        assert_eq!(sanitize_error_body(&input), "x".repeat(239));
     }
 
     #[test]

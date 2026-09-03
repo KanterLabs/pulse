@@ -18,6 +18,14 @@
       <arg name="query" type="s" direction="in"/>
       <arg name="results_json" type="s" direction="out"/>
     </method>
+    <method name="GetView">
+      <arg name="view" type="s" direction="in"/>
+      <arg name="cursor" type="s" direction="in"/>
+      <arg name="view_json" type="s" direction="out"/>
+    </method>
+    <method name="GetAuthState">
+      <arg name="auth_state_json" type="s" direction="out"/>
+    </method>
     <method name="OpenUri">
       <arg name="uri" type="s" direction="in"/>
     </method>

@@ -10,9 +10,10 @@ playback in Spotify itself.
   <img src="assets/pulse-hero.svg" alt="Pulse heartbeat waveform banner" width="1200">
 </p>
 
-> **Maturity:** pre-alpha. The repository is being built milestone by
-> milestone and is not a packaged, supported daily-driver release yet. Expect
-> breaking changes, incomplete features, and Fedora/GNOME compatibility work.
+> **Maturity:** feature-complete pre-alpha. The v0.1 source, installer, daemon,
+> and extension are implemented and covered by automated checks. A real Fedora
+> GNOME session is still required for final desktop compatibility validation;
+> expect breaking changes before a supported daily-driver release.
 
 The banner and the companion [icon](assets/pulse-icon.svg) and
 [symbolic mark](assets/pulse-symbolic.svg) are project identity artwork, not
@@ -33,18 +34,18 @@ Spotify client.
 
 ## Feature status
 
-The product is intentionally being delivered in small, testable milestones.
-The table describes the public target; a feature is not a release promise
-until its acceptance criteria are met.
+The table describes the implemented v0.1 source tree. “Implemented” means the
+code and automated contract tests are present; live GNOME behavior remains a
+Fedora-laptop validation item until the first alpha release.
 
 | Area | Target | Status in this pre-alpha tree |
 | --- | --- | --- |
-| Panel mini-player | Play/pause, next, previous, current playback, and Open in Spotify | In development |
-| Local playback | MPRIS control of the official Spotify desktop client | In development |
-| Account data | PKCE login, recently played, saved items, and the user's playlists | Planned after the local path |
-| Search and queue | Debounced search, paginated views, and a read-only queue | Planned |
-| Offline behavior | Cached snapshots with bounded artwork and stale-while-revalidate refresh | Planned |
-| Installation | Copy one repository folder, then install per-user through the supplied scripts | In development |
+| Panel mini-player | Play/pause, next, previous, current playback, and Open in Spotify | Implemented |
+| Local playback | MPRIS control of the official Spotify desktop client | Implemented |
+| Account data | PKCE login, recently played, saved items, and the user's playlists | Implemented |
+| Search and queue | Debounced search, paginated views, and a read-only queue | Implemented |
+| Offline behavior | Cached snapshots with bounded artwork and stale fallback | Implemented |
+| Installation | Copy one repository folder, then install per-user through the supplied scripts | Implemented |
 
 For the complete implementation sequence and acceptance criteria, see the
 [Fedora laptop implementation plan](docs/FEDORA_IMPLEMENTATION_PLAN.md).
@@ -106,7 +107,7 @@ manager, for example:
 
 ```bash
 sudo dnf install cargo rustfmt clippy gjs gnome-shell python3 shellcheck \
-  glib2-devel nodejs
+  glib2-devel libsecret nodejs
 ```
 
 Package names can differ between Fedora releases. If the doctor reports a
@@ -169,12 +170,19 @@ and [Developer Policy](https://developer.spotify.com/policy) before enabling
 account features; those rules can change.
 
 1. Create one application in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard).
-2. Add the exact loopback redirect URI shown by Pulse's configuration or login
-   instructions. Pulse uses a literal `127.0.0.1` loopback address, for example
-   `http://127.0.0.1:<dynamic-port>/callback`; do not substitute `localhost`.
-3. Configure only the client ID in Pulse's user configuration. A client ID is
-   not a secret. Do not add a client secret to the repository, a service file,
-   the database, logs, shell history, or screenshots.
+2. Add `http://127.0.0.1/callback` to the app's redirect allowlist. Pulse uses
+   Spotify's loopback exception and adds a dynamically assigned port at login;
+   register the loopback URI without a port and do not substitute `localhost`.
+3. Put only the client ID in `~/.config/pulse/config.toml`:
+
+   ```toml
+   [spotify]
+   client_id = "your-public-client-id"
+   ```
+
+   Then restart with `systemctl --user restart pulse-daemon.service`. A client
+   ID is not a secret. Do not add a client secret to the repository, a service
+   file, the database, logs, shell history, or screenshots.
 4. Start login from Pulse. It opens the system browser and uses Authorization
    Code with PKCE; the daemon keeps the refresh token in GNOME Keyring through
    Secret Service.

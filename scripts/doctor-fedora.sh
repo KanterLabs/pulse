@@ -152,6 +152,7 @@ else
     check_command 'GSettings schema compiler' glib-compile-schemas optional
 fi
 check_command 'GJS runtime' gjs optional
+check_command 'Secret Service command-line client' secret-tool optional
 check_command 'Python 3 diagnostics' python3 optional
 check_command 'ShellCheck (script lint)' shellcheck optional
 check_command 'D-Bus activation environment updater' dbus-update-activation-environment optional
@@ -214,7 +215,7 @@ fi
 
 if [[ "$blockers" -gt 0 ]]; then
     printf '\nInstall missing Fedora packages manually (this script never installs):\n'
-    printf '  sudo dnf install cargo rust glib2-devel gnome-shell systemd dbus-tools\n'
+    printf '  sudo dnf install cargo rust glib2-devel libsecret gnome-shell systemd dbus-tools\n'
     printf 'Then start Spotify and rerun this doctor to verify its MPRIS name.\n'
     exit 1
 fi

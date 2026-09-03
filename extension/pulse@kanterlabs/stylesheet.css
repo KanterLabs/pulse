@@ -249,6 +249,50 @@
     background-color: rgba(0, 0, 0, 0.12);
 }
 
+.pulse-auth-item {
+    padding-top: 4px;
+    padding-bottom: 6px;
+}
+
+.pulse-auth-status {
+    color: #a9a9b2;
+    font-size: 0.82em;
+}
+
+.pulse-auth-actions {
+    spacing: 6px;
+    padding-top: 6px;
+}
+
+.pulse-auth-button {
+    min-height: 30px;
+    padding: 0 9px;
+    border-radius: 8px;
+    background-color: rgba(30, 215, 96, 0.16);
+    color: #8be4a7;
+    font-size: 0.82em;
+    font-weight: 600;
+}
+
+.pulse-auth-button:hover,
+.pulse-auth-button:focus {
+    background-color: rgba(30, 215, 96, 0.26);
+}
+
+.pulse-theme-light .pulse-auth-status {
+    color: #67676f;
+}
+
+.pulse-theme-light .pulse-auth-button {
+    background-color: rgba(20, 140, 70, 0.13);
+    color: #087c3d;
+}
+
+.pulse-theme-light .pulse-auth-button:hover,
+.pulse-theme-light .pulse-auth-button:focus {
+    background-color: rgba(20, 140, 70, 0.20);
+}
+
 .pulse-navigation {
     spacing: 2px;
 }
@@ -351,6 +395,21 @@
     border-radius: 7px;
 }
 
+.pulse-result-row {
+    spacing: 9px;
+}
+
+.pulse-result-artwork {
+    icon-size: 32px;
+    width: 32px;
+    height: 32px;
+    border-radius: 5px;
+}
+
+.pulse-result-details {
+    spacing: 1px;
+}
+
 .pulse-result-button:hover,
 .pulse-result-button:focus {
     background-color: rgba(255, 255, 255, 0.08);
@@ -379,6 +438,30 @@
 .pulse-theme-light .pulse-result-subtitle,
 .pulse-theme-light .pulse-search-message {
     color: #74747c;
+}
+
+.pulse-load-more-button {
+    min-height: 30px;
+    margin-top: 6px;
+    border-radius: 7px;
+    background-color: rgba(255, 255, 255, 0.07);
+    color: #d0d0d5;
+    font-size: 0.8em;
+}
+
+.pulse-load-more-button:hover,
+.pulse-load-more-button:focus {
+    background-color: rgba(255, 255, 255, 0.13);
+}
+
+.pulse-theme-light .pulse-load-more-button {
+    background-color: rgba(0, 0, 0, 0.05);
+    color: #515158;
+}
+
+.pulse-theme-light .pulse-load-more-button:hover,
+.pulse-theme-light .pulse-load-more-button:focus {
+    background-color: rgba(0, 0, 0, 0.10);
 }
 
 .pulse-compact-controls .pulse-controls {
