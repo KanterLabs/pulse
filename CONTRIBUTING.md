@@ -54,10 +54,21 @@ find scripts -type f \( -name '*.sh' -o -name '*.bash' \) -print0 | xargs -0 -r 
 find scripts -type f \( -name '*.sh' -o -name '*.bash' \) -print0 | xargs -0 -r shellcheck
 ```
 
-Validate extension JSON with Python and GSettings schemas with
-`glib-compile-schemas --strict --dry-run` when those files exist. The CI
-workflow performs conditional JavaScript/schema validation and reports when an
-optional validator is unavailable.
+Run the deterministic extension and installer regression suites:
+
+```bash
+node --test tests/*.test.mjs
+python3 tests/install-user.test.py
+```
+
+These execute the extension against a deliberately limited Shell API and
+exercise failed startup, repeated teardown, delayed replies, cancellation,
+and populated-data preservation using isolated fixtures. They do not prove
+native GNOME stability. Run the [isolated GNOME smoke test](tests/gnome-smoke/README.md)
+for native lifecycle coverage. Validate extension JSON with Python and GSettings
+schemas with `glib-compile-schemas --strict --dry-run`. CI requires the Node
+regressions and installer tests; JavaScript syntax alone cannot catch missing
+GNOME APIs or GObject lifetime errors.
 
 Contract tests should use a private session bus and deterministic fixtures;
 they must not depend on a contributor's live desktop session, Spotify account,
