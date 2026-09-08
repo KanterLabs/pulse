@@ -97,10 +97,10 @@ Install or verify these before building:
 - the official Spotify desktop client, installed through Flatpak or RPM/native
   packaging, with MPRIS visible after Spotify starts.
 
-The optional development checks also use `shellcheck`, Node.js, and
-`glib-compile-schemas` when those tools are available. CI reports missing
-optional extension validators instead of silently pretending that validation
-ran.
+Development checks use Node.js for lifecycle regressions, Python 3 for
+installer tests, `shellcheck` for shell scripts, and `glib-compile-schemas`
+for settings validation. CI also runs an isolated native GNOME 49 lifecycle
+test; see [the stability repair notes](docs/STABILITY_VALIDATION.md).
 
 The usual Fedora development tools can be installed with your normal package
 manager, for example:
@@ -140,10 +140,38 @@ installs them under XDG locations, including:
 ```
 
 It reloads the user service manager and integration files, enables the daemon,
-and enables the extension where supported. Existing configuration, database,
-tokens, and artwork remain in place during an upgrade. If a script is absent
-in a checkout from before its milestone lands, follow the implementation plan
-and do not copy binaries or service files by hand.
+and starts it by default. The GNOME extension is installed disabled because
+this tree is pre-alpha; the installer never enables it implicitly. Before an
+extension install or upgrade, it disables that UUID through `gnome-extensions`,
+including a stale enabled setting left after an earlier copy was removed. If
+an existing extension directory is present and that command is unavailable or
+fails, the installer stops before replacing any installed file; the old tree
+and install destinations remain unchanged. It does not use a GSettings
+fallback when an old tree is present. When the destination is absent, the
+installer can remove only Pulse's UUID from the enabled-extension setting
+through `gsettings` and verifies that it is gone. If it cannot confirm the
+disabled state, it stops before writing the new extension. Existing
+configuration, database, tokens, artwork, and cache remain in place during an
+upgrade. If a script is absent in a checkout from before its milestone lands,
+follow the implementation plan and do not copy binaries or service files by
+hand.
+
+For the safest first run, install without starting the daemon:
+
+```bash
+./scripts/install-user.sh --no-start
+```
+
+When the daemon is ready and the GNOME session is stable, opt in to the
+extension explicitly:
+
+```bash
+./scripts/install-user.sh --enable-extension
+```
+
+`--enable-extension` cannot be combined with `--no-start`. Omitting the flag
+leaves the extension disabled; enable it later with
+`gnome-extensions enable pulse@kanterlabs` after checking the GNOME version.
 
 After installation, useful checks are:
 
@@ -153,6 +181,40 @@ busctl --user introspect io.kanterlabs.Pulse /io/kanterlabs/Pulse
 gnome-extensions info pulse@kanterlabs
 journalctl --user -u pulse-daemon.service --since today
 ```
+
+If an install or upgrade reports that it could not disable the existing
+extension, do not remove runtime data. The installer has left the old
+extension tree and install destinations unchanged. From a working GNOME
+session, disable the UUID manually and retry:
+
+```bash
+gnome-extensions disable pulse@kanterlabs
+./scripts/install-user.sh
+```
+
+If GNOME is unavailable after the extension was explicitly enabled, switch to
+a text console. This is an explicit recovery command; the installer does not
+quarantine an existing extension automatically. Move only the installed
+extension outside GNOME Shell's search path into a unique quarantine, while
+leaving Pulse runtime data in place:
+
+```bash
+data_home=${XDG_DATA_HOME:-$HOME/.local/share}
+extension_dir="$data_home/gnome-shell/extensions/pulse@kanterlabs"
+quarantine_parent="$data_home/pulse-extension-quarantine"
+mkdir -p -- "$quarantine_parent"
+quarantine_dir=$(mktemp -d "$quarantine_parent/pulse@kanterlabs.XXXXXX")
+mv -- "$extension_dir" "$quarantine_dir/"
+printf 'quarantined extension: %s\n' "$quarantine_dir/pulse@kanterlabs"
+```
+
+Log out and back in before retrying the installer without
+`--enable-extension`. This recovery procedure does not by itself establish
+the cause of a reboot or other laptop failure. The default uninstall also
+leaves the database,
+configuration, OAuth tokens, artwork, and cache untouched; only
+`./scripts/uninstall-user.sh --purge` removes those directories after its
+explicit safety checks.
 
 For development synchronization, use `./scripts/dev-sync.sh` only when that
 script is present and read its `--help` output first. To remove an install

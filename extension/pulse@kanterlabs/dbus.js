@@ -10,6 +10,9 @@ const OBJECT_PATH = '/io/kanterlabs/Pulse';
 const INTERFACE_NAME = 'io.kanterlabs.Pulse1';
 const RETRY_SECONDS = 12;
 const MAX_ITEMS = 100;
+const MAX_INFLIGHT_CALLS = 32;
+const MAX_VIEW_REQUESTS = 16;
+const MAX_JSON_LENGTH = 4 * 1024 * 1024;
 
 // Keep this in lockstep with dbus/io.kanterlabs.Pulse1.xml. In particular,
 // BeginLogin returns a URL and LoginStateChanged/ErrorChanged use the typed
@@ -83,7 +86,12 @@ function textOr(value, fallback = '') {
 }
 
 function numberOr(value, fallback = 0) {
-    return Number.isFinite(Number(value)) ? Number(value) : fallback;
+    try {
+        const number = Number(value);
+        return Number.isFinite(number) ? number : fallback;
+    } catch (_error) {
+        return fallback;
+    }
 }
 
 function boolOr(value, fallback = false) {
@@ -101,6 +109,8 @@ function firstString(...values) {
 function parseJsonValue(raw) {
     if (typeof raw !== 'string')
         return raw;
+    if (raw.length > MAX_JSON_LENGTH)
+        return null;
     try {
         return JSON.parse(raw);
     } catch (_error) {
@@ -442,6 +452,25 @@ function errorMessage(error, fallback = 'Pulse could not complete that action.')
     return textOr(error?.message, fallback);
 }
 
+function reportCallbackError(error) {
+    try {
+        globalThis.logError?.(error);
+    } catch (_logError) {
+        // Logging must never turn a contained callback failure into a shell
+        // exception. The callback has already been prevented from escaping.
+    }
+}
+
+function observeCallbackResult(result) {
+    if (!result || typeof result.catch !== 'function')
+        return;
+    try {
+        result.catch(reportCallbackError);
+    } catch (error) {
+        reportCallbackError(error);
+    }
+}
+
 export const PulseConnection = GObject.registerClass({
     Signals: {
         'snapshot-changed': {},
@@ -454,13 +483,22 @@ export const PulseConnection = GObject.registerClass({
 }, class PulseConnection extends GObject.Object {
     _init() {
         super._init();
+        this._destroyed = false;
         this._proxy = null;
         this._proxySignals = [];
+        this._proxyCancellable = null;
+        this._proxyOwner = null;
+        this._ownerEpoch = 0;
+        this._pendingCancellables = new Set();
         this._searchCancellable = null;
         this._searchSequence = 0;
+        this._refreshCancellable = null;
+        this._snapshotCancellable = null;
         this._viewCancellables = new Map();
         this._viewSequences = new Map();
+        this._viewRequestOrder = [];
         this._authSequence = 0;
+        this._authCancellable = null;
         this._retrySource = 0;
         this._generation = 0;
         this._connected = false;
@@ -487,67 +525,112 @@ export const PulseConnection = GObject.registerClass({
 
     start() {
         this.stop();
+        if (!this._isAlive())
+            return;
 
         const generation = ++this._generation;
-        Gio.DBusProxy.new_for_bus(
-            Gio.BusType.SESSION,
-            Gio.DBusProxyFlags.NONE,
-            getInterfaceInfo(),
-            BUS_NAME,
-            OBJECT_PATH,
-            INTERFACE_NAME,
-            null,
-            (source, result) => {
-                if (generation !== this._generation)
-                    return;
-
-                try {
-                    const proxy = Gio.DBusProxy.new_for_bus_finish(result);
+        const cancellable = new Gio.Cancellable();
+        this._proxyCancellable = cancellable;
+        try {
+            Gio.DBusProxy.new_for_bus(
+                Gio.BusType.SESSION,
+                Gio.DBusProxyFlags.NONE,
+                getInterfaceInfo(),
+                BUS_NAME,
+                OBJECT_PATH,
+                INTERFACE_NAME,
+                cancellable,
+                (_source, result) => {
+                    if (this._proxyCancellable === cancellable)
+                        this._proxyCancellable = null;
+                    let proxy;
+                    try {
+                        proxy = Gio.DBusProxy.new_for_bus_finish(result);
+                    } catch (error) {
+                        if (this._isCurrent(generation))
+                            this._handleConnectionError(error);
+                        return;
+                    }
+                    if (!this._isCurrent(generation))
+                        return;
                     this._attachProxy(proxy, generation);
-                } catch (error) {
-                    this._handleConnectionError(error);
-                }
-            });
+                });
+        } catch (error) {
+            if (this._proxyCancellable === cancellable)
+                this._proxyCancellable = null;
+            this._handleConnectionError(error);
+        }
     }
 
     stop() {
         this._generation++;
-        if (this._searchCancellable) {
-            this._searchCancellable.cancel();
-            this._searchCancellable = null;
-        }
-        for (const cancellable of this._viewCancellables.values())
-            cancellable.cancel();
-        this._viewCancellables.clear();
-        this._viewSequences.clear();
-        this._searchSequence++;
-        this._authSequence++;
+        this._cancelCancellable(this._proxyCancellable);
+        this._proxyCancellable = null;
+        this._cancelPendingRequests();
+        this._proxyOwner = null;
+        this._ownerEpoch++;
         if (this._retrySource) {
-            GLib.Source.remove(this._retrySource);
+            try {
+                GLib.Source.remove(this._retrySource);
+            } catch (_error) {
+                // The source may already have fired and removed itself.
+            }
             this._retrySource = 0;
         }
 
-        for (const [object, id] of this._proxySignals)
-            object.disconnect(id);
+        for (const [object, id] of this._proxySignals) {
+            try {
+                object.disconnect(id);
+            } catch (_error) {
+                // A proxy can dispose itself while its owner disappears.
+            }
+        }
         this._proxySignals = [];
         this._proxy = null;
+        // Disconnecting the proxy signals and dropping our reference lets GIO
+        // release it naturally after any cancelled calls have settled.
 
         if (this._connected) {
             this._connected = false;
-            this.emit('connection-changed', false);
+            if (this._isAlive())
+                this._emitSafely('connection-changed', false);
         }
 
+        if (!this._isAlive())
+            return;
+
         this._setAuthState(normalizeAuthState(null));
-        this._setSnapshot(disconnectedSnapshot());
+        if (this._isAlive())
+            this._setSnapshot(disconnectedSnapshot());
     }
 
     destroy() {
+        if (this._destroyed)
+            return;
+        this._destroyed = true;
         this.stop();
-        this.run_dispose();
     }
 
     refresh() {
-        this._call('Refresh', new GLib.Variant('()', []), () => this._requestSnapshot());
+        if (!this._isAlive())
+            return;
+        this._cancelCancellable(this._refreshCancellable);
+        const cancellable = new Gio.Cancellable();
+        this._refreshCancellable = cancellable;
+        const clear = () => {
+            if (this._refreshCancellable === cancellable)
+                this._refreshCancellable = null;
+        };
+        this._call(
+            'Refresh',
+            new GLib.Variant('()', []),
+            () => {
+                clear();
+                if (this._isAlive())
+                    this._requestSnapshot();
+            },
+            cancellable,
+            () => clear());
     }
 
     playPause() {
@@ -568,21 +651,37 @@ export const PulseConnection = GObject.registerClass({
     }
 
     openUri(uri) {
-        if (!uri)
+        if (!this._isAlive() || !uri)
             return;
-        this._call('OpenUri', new GLib.Variant('(s)', [String(uri)]));
+        let value;
+        try {
+            value = String(uri);
+        } catch (_error) {
+            this._setError('Pulse received an invalid URI.');
+            return;
+        }
+        if (!value.trim())
+            return;
+        this._call('OpenUri', new GLib.Variant('(s)', [value]));
     }
 
     search(query) {
-        const value = String(query ?? '').trim();
+        if (!this._isAlive())
+            return;
+        let value;
+        try {
+            value = String(query ?? '').trim();
+        } catch (_error) {
+            value = '';
+        }
         this._searchSequence++;
         const sequence = this._searchSequence;
         if (this._searchCancellable) {
-            this._searchCancellable.cancel();
+            this._cancelCancellable(this._searchCancellable);
             this._searchCancellable = null;
         }
         if (!value) {
-            this.emit('search-results', normalizeViewPayload({items: []}));
+            this._emitSafely('search-results', normalizeViewPayload({items: []}));
             return;
         }
 
@@ -593,42 +692,70 @@ export const PulseConnection = GObject.registerClass({
                 return;
             this._searchCancellable = null;
             const result = unpackFirst(reply);
-            this.emit('search-results', normalizeViewPayload(result));
+            this._emitSafely('search-results', normalizeViewPayload(result));
         }, cancellable, error => {
             if (sequence !== this._searchSequence || this._searchCancellable !== cancellable)
                 return;
             this._searchCancellable = null;
-            this.emit('search-results', normalizeViewPayload(null, errorMessage(error)));
+            this._emitSafely('search-results', normalizeViewPayload(null, errorMessage(error)));
         });
     }
 
     getView(view, cursor = '', onSuccess = null) {
-        const name = String(view || 'home').trim() || 'home';
-        const pageCursor = String(cursor || '');
+        if (!this._isAlive())
+            return;
+        let name;
+        let pageCursor;
+        try {
+            name = String(view || 'home').trim() || 'home';
+            pageCursor = String(cursor || '');
+        } catch (_error) {
+            name = 'home';
+            pageCursor = '';
+        }
         const previous = this._viewCancellables.get(name);
         if (previous)
-            previous.cancel();
+            this._cancelCancellable(previous);
 
         const sequence = (this._viewSequences.get(name) || 0) + 1;
         this._viewSequences.set(name, sequence);
         const cancellable = new Gio.Cancellable();
         this._viewCancellables.set(name, cancellable);
+        this._viewRequestOrder = this._viewRequestOrder.filter(entry => entry !== name);
+        this._viewRequestOrder.push(name);
+        while (this._viewRequestOrder.length > MAX_VIEW_REQUESTS) {
+            const evicted = this._viewRequestOrder.shift();
+            if (evicted === name)
+                continue;
+            this._cancelCancellable(this._viewCancellables.get(evicted));
+            this._viewCancellables.delete(evicted);
+            this._viewSequences.delete(evicted);
+        }
         const emitResult = payload => {
             if (this._viewSequences.get(name) !== sequence ||
                 this._viewCancellables.get(name) !== cancellable)
                 return;
+            this._emitSafely('view-results', name, payload);
+            if (!this._isAlive() || this._viewSequences.get(name) !== sequence ||
+                this._viewCancellables.get(name) !== cancellable)
+                return;
             this._viewCancellables.delete(name);
-            this.emit('view-results', name, payload);
-            if (onSuccess)
-                onSuccess(payload);
+            this._viewSequences.delete(name);
+            this._viewRequestOrder = this._viewRequestOrder.filter(entry => entry !== name);
+            this._invokeCallback(onSuccess, payload);
         };
         const emitError = error => {
             if (this._viewSequences.get(name) !== sequence ||
                 this._viewCancellables.get(name) !== cancellable)
                 return;
-            this._viewCancellables.delete(name);
             const payload = normalizeViewPayload(null, errorMessage(error));
-            this.emit('view-results', name, payload);
+            this._emitSafely('view-results', name, payload);
+            if (!this._isAlive() || this._viewSequences.get(name) !== sequence ||
+                this._viewCancellables.get(name) !== cancellable)
+                return;
+            this._viewCancellables.delete(name);
+            this._viewSequences.delete(name);
+            this._viewRequestOrder = this._viewRequestOrder.filter(entry => entry !== name);
         };
 
         this._call(
@@ -640,104 +767,183 @@ export const PulseConnection = GObject.registerClass({
     }
 
     getAuthState(onSuccess = null) {
+        if (!this._isAlive())
+            return;
         this._authSequence++;
         const sequence = this._authSequence;
+        this._cancelCancellable(this._authCancellable);
+        const cancellable = new Gio.Cancellable();
+        this._authCancellable = cancellable;
+        const clear = () => {
+            if (this._authCancellable === cancellable)
+                this._authCancellable = null;
+        };
         this._call('GetAuthState', new GLib.Variant('()', []), reply => {
             if (sequence !== this._authSequence)
                 return;
+            clear();
             const state = normalizeAuthState(unpackFirst(reply));
             this._setAuthState(state);
-            if (onSuccess)
-                onSuccess(state);
-        }, null, error => {
+            if (this._isAlive())
+                this._invokeCallback(onSuccess, state);
+        }, cancellable, error => {
             if (sequence !== this._authSequence)
                 return;
+            clear();
             const state = normalizeAuthState(this._authState, errorMessage(error));
             this._setAuthState(state);
-            if (onSuccess)
-                onSuccess(state);
+            if (this._isAlive())
+                this._invokeCallback(onSuccess, state);
         });
     }
 
     beginLogin(onSuccess = null, onError = null) {
+        if (!this._isAlive())
+            return;
         this._call('BeginLogin', new GLib.Variant('()', []), reply => {
             const authorizationUrl = textOr(unpackFirst(reply));
-            if (authorizationUrl)
-                onSuccess?.(authorizationUrl);
-            else
+            if (authorizationUrl) {
+                this._invokeCallback(onSuccess, authorizationUrl);
+            } else if (this._isAlive()) {
                 this._setError('Pulse returned an empty authorization URL.');
+            }
         }, null, error => {
+            if (!this._isAlive())
+                return;
             this._setError(errorMessage(error));
-            onError?.(error);
+            if (this._isAlive())
+                this._invokeCallback(onError, error);
         });
     }
 
     logout(onSuccess = null) {
+        if (!this._isAlive())
+            return;
         this._call('Logout', new GLib.Variant('()', []), () => {
+            if (!this._isAlive())
+                return;
             this._setAuthState(normalizeAuthState(false));
-            onSuccess?.();
-            this.getAuthState();
+            if (!this._isAlive())
+                return;
+            this._invokeCallback(onSuccess);
+            if (this._isAlive())
+                this.getAuthState();
         });
     }
 
     _attachProxy(proxy, generation) {
-        if (generation !== this._generation) {
-            proxy.run_dispose();
+        if (!proxy) {
+            if (this._isCurrent(generation))
+                this._handleConnectionError(new Error('Pulse returned an empty DBus proxy.'));
+            return;
+        }
+        if (!this._isCurrent(generation))
+            return;
+
+        if (this._proxy && this._proxy !== proxy)
+            this._detachProxy();
+        this._proxy = proxy;
+        this._proxyOwner = null;
+        try {
+            this._proxySignals = [];
+            this._proxySignals.push([
+                proxy,
+                proxy.connect('g-signal', (_proxy, _sender, signalName, parameters) => {
+                    this._runSafely(() => this._handleSignal(proxy, generation, signalName, parameters));
+                }),
+            ]);
+            this._proxySignals.push([
+                proxy,
+                proxy.connect('g-properties-changed', () => {
+                    this._runSafely(() => this._readCachedSnapshot(proxy, generation));
+                }),
+            ]);
+            this._proxySignals.push([
+                proxy,
+                proxy.connect('notify::g-name-owner', () => {
+                    this._runSafely(() => this._syncProxyOwner(proxy, generation));
+                }),
+            ]);
+        } catch (error) {
+            this._detachProxy();
+            if (this._isCurrent(generation))
+                this._handleConnectionError(error);
             return;
         }
 
-        this._proxy = proxy;
-        this._proxySignals = [
-            [proxy, proxy.connect('g-signal', (_proxy, _sender, signalName, parameters) => {
-                this._handleSignal(signalName, parameters);
-            })],
-            [proxy, proxy.connect('g-properties-changed', () => {
-                this._readCachedSnapshot();
-            })],
-            [proxy, proxy.connect('notify::g-name-owner', () => {
-                this._syncProxyOwner();
-            })],
-        ];
-
-        this._syncProxyOwner();
+        this._runSafely(() => this._syncProxyOwner(proxy, generation));
     }
 
-    _syncProxyOwner() {
-        if (!this._proxy)
+    _syncProxyOwner(proxy = this._proxy, generation = this._generation) {
+        if (!this._isCurrent(generation) || !proxy || this._proxy !== proxy)
             return;
 
-        const hasOwner = Boolean(this._proxy.g_name_owner);
+        let hasOwner;
+        let owner;
+        try {
+            owner = textOr(proxy.g_name_owner);
+            hasOwner = Boolean(owner);
+        } catch (error) {
+            this._handleConnectionError(error);
+            return;
+        }
+        if (owner !== this._proxyOwner) {
+            const replacingOwner = Boolean(this._proxyOwner);
+            this._proxyOwner = owner;
+            this._ownerEpoch++;
+            this._cancelPendingRequests();
+            // A bus name can move directly between owners without an empty
+            // intermediate value. Clear UI actions tied to the old daemon.
+            if (replacingOwner)
+                this._setDisconnected('The Pulse daemon connection changed.');
+            if (!this._isCurrent(generation))
+                return;
+        }
         if (!hasOwner) {
             this._setDisconnected('The Pulse daemon is offline.');
-            this._scheduleRetry();
+            if (this._isAlive())
+                this._scheduleRetry(generation);
             return;
         }
 
         if (!this._connected) {
             this._connected = true;
             this._error = '';
-            this.emit('connection-changed', true);
+            this._emitSafely('connection-changed', true);
         }
+        if (!this._isCurrent(generation))
+            return;
         this._requestSnapshot();
-        this.getAuthState();
+        if (this._isCurrent(generation))
+            this.getAuthState();
     }
 
     _requestSnapshot() {
+        if (!this._isAlive())
+            return;
+        this._cancelCancellable(this._snapshotCancellable);
+        const cancellable = new Gio.Cancellable();
+        this._snapshotCancellable = cancellable;
+        const clear = () => {
+            if (this._snapshotCancellable === cancellable)
+                this._snapshotCancellable = null;
+        };
         this._call('GetSnapshot', new GLib.Variant('()', []), reply => {
+            clear();
             const raw = unpackFirst(reply);
-            if (raw !== null)
+            if (raw !== null && this._isAlive())
                 this._setSnapshot(normalizeSnapshot(raw));
-        });
+        }, cancellable, () => clear());
     }
 
-    _readCachedSnapshot() {
-        if (!this._proxy)
+    _readCachedSnapshot(proxy = this._proxy, generation = this._generation) {
+        if (!this._isCurrentProxy(proxy, generation))
             return;
 
         try {
-            const value = this._proxy.get_cached_property('Playback');
+            const value = proxy.get_cached_property('Playback');
             const raw = unpackFirst(value);
-            if (raw !== null)
+            if (raw !== null && this._isCurrent(generation))
                 this._setSnapshot(normalizeSnapshot(raw));
         } catch (_error) {
             // GetSnapshot remains authoritative with daemons that do not expose
@@ -745,12 +951,23 @@ export const PulseConnection = GObject.registerClass({
         }
     }
 
-    _handleSignal(signalName, parameters) {
+    _handleSignal(proxy, generation, signalName, parameters) {
+        // Keep the old private-call shape usable for lightweight harnesses and
+        // callers that only have a signal name. Proxy-bound callbacks always
+        // use the generation-aware form above.
+        if (typeof proxy === 'string') {
+            parameters = generation;
+            signalName = proxy;
+            proxy = this._proxy;
+            generation = this._generation;
+        }
+        if (!this._isCurrentProxy(proxy, generation))
+            return;
         switch (signalName) {
         case 'SnapshotChanged':
         case 'PlaybackChanged': {
             const raw = unpackFirst(parameters);
-            if (raw !== null)
+            if (raw !== null && this._isCurrent(generation))
                 this._setSnapshot(normalizeSnapshot(raw));
             break;
         }
@@ -766,7 +983,8 @@ export const PulseConnection = GObject.registerClass({
             this._setAuthState(normalizeAuthState(authenticated));
             // The signal carries the fast path; GetAuthState fills in whether a
             // client ID is configured and any explanatory daemon state.
-            this.getAuthState();
+            if (this._isCurrent(generation))
+                this.getAuthState();
             break;
         }
         default:
@@ -775,94 +993,280 @@ export const PulseConnection = GObject.registerClass({
     }
 
     _call(method, parameters, onSuccess = null, cancellable = null, onError = null) {
-        if (!this._proxy || !this._proxy.g_name_owner) {
+        if (!this._isAlive())
+            return false;
+
+        let proxy = this._proxy;
+        let hasOwner = false;
+        try {
+            hasOwner = Boolean(proxy?.g_name_owner);
+        } catch (error) {
+            this._handleCallError(error);
+            if (this._isAlive())
+                this._invokeCallback(onError, error);
+            return false;
+        }
+        if (!proxy || !hasOwner) {
             const error = new Error('The Pulse daemon is offline.');
             this._setDisconnected(error.message);
-            this._scheduleRetry();
-            onError?.(error);
-            return;
+            if (this._isAlive()) {
+                this._scheduleRetry();
+                this._invokeCallback(onError, error);
+            }
+            return false;
         }
 
         const generation = this._generation;
+        const ownerEpoch = this._ownerEpoch;
+        const requestCancellable = cancellable || new Gio.Cancellable();
+        if (requestCancellable.is_cancelled?.())
+            return false;
+        if (!this._trackCancellable(requestCancellable)) {
+            const error = new Error('Pulse has too many pending DBus requests.');
+            this._handleCallError(error);
+            if (this._isAlive())
+                this._invokeCallback(onError, error);
+            return false;
+        }
+        let settled = false;
+        const cleanup = () => {
+            if (settled)
+                return;
+            settled = true;
+            this._pendingCancellables.delete(requestCancellable);
+        };
         try {
-            this._proxy.call(
+            proxy.call(
                 method,
                 parameters,
                 Gio.DBusCallFlags.NONE,
                 -1,
-                cancellable,
-                (proxy, result) => {
-                    if (generation !== this._generation)
-                        return;
+                requestCancellable,
+                (replyProxy, result) => {
+                    cleanup();
+                    let reply;
                     try {
-                        const reply = proxy.call_finish(result);
-                        if (onSuccess)
-                            onSuccess(reply);
+                        reply = replyProxy.call_finish(result);
                     } catch (error) {
-                        if (cancellable?.is_cancelled())
+                        if (requestCancellable.is_cancelled?.() || !this._isCurrent(generation) ||
+                            this._ownerEpoch !== ownerEpoch || this._proxy !== proxy ||
+                            replyProxy !== proxy)
                             return;
                         this._handleCallError(error);
-                        onError?.(error);
+                        if (this._isAlive())
+                            this._invokeCallback(onError, error);
+                        return;
                     }
+                    if (this._isCurrent(generation) && this._ownerEpoch === ownerEpoch &&
+                        this._proxy === proxy && replyProxy === proxy &&
+                        !requestCancellable.is_cancelled?.())
+                        this._invokeCallback(onSuccess, reply);
                 });
         } catch (error) {
+            cleanup();
+            if (!this._isCurrent(generation) || requestCancellable.is_cancelled?.())
+                return false;
             this._handleCallError(error);
-            onError?.(error);
+            if (this._isAlive())
+                this._invokeCallback(onError, error);
+            return false;
         }
+        return true;
     }
 
     _handleConnectionError(error) {
+        if (!this._isAlive())
+            return;
         const message = errorMessage(error, 'The Pulse daemon is unavailable.');
         this._setDisconnected(message);
-        this._scheduleRetry();
+        if (this._isAlive())
+            this._scheduleRetry(this._generation);
     }
 
     _handleCallError(error) {
+        if (!this._isAlive())
+            return;
         const message = errorMessage(error);
         this._setError(message);
+        if (!this._isAlive())
+            return;
         if (error?.matches?.(Gio.DBusError, Gio.DBusError.SERVICE_UNKNOWN))
             this._setDisconnected('The Pulse daemon is offline.');
+        if (this._isAlive() && error?.matches?.(Gio.DBusError, Gio.DBusError.SERVICE_UNKNOWN))
+            this._scheduleRetry(this._generation);
     }
 
     _setDisconnected(message) {
+        if (!this._isAlive())
+            return;
         this._setError(message);
+        if (!this._isAlive())
+            return;
         this._setSnapshot(disconnectedSnapshot(message));
+        if (!this._isAlive())
+            return;
         this._setAuthState(normalizeAuthState(null, message));
+        if (!this._isAlive())
+            return;
         if (this._connected) {
             this._connected = false;
-            this.emit('connection-changed', false);
+            this._emitSafely('connection-changed', false);
         }
     }
 
     _setError(message) {
+        if (!this._isAlive())
+            return;
         const value = textOr(message);
         if (value === this._error)
             return;
         this._error = value;
-        this.emit('error-changed', value);
+        this._emitSafely('error-changed', value);
     }
 
     _setAuthState(state) {
+        if (!this._isAlive())
+            return;
         const value = state && typeof state === 'object' ? state : normalizeAuthState(state);
         this._authState = value;
-        this.emit('auth-state-changed', JSON.stringify(value));
+        let payload;
+        try {
+            payload = JSON.stringify(value);
+        } catch (_error) {
+            payload = JSON.stringify(normalizeAuthState(null, 'The daemon returned invalid authentication state.'));
+        }
+        this._emitSafely('auth-state-changed', textOr(payload, '{}'));
     }
 
     _setSnapshot(snapshot) {
+        if (!this._isAlive())
+            return;
         this._snapshot = snapshot;
-        this.emit('snapshot-changed');
+        this._emitSafely('snapshot-changed');
     }
 
-    _scheduleRetry() {
-        if (this._retrySource)
+    _scheduleRetry(generation = this._generation) {
+        if (!this._isCurrent(generation) || this._retrySource)
             return;
 
-        this._retrySource = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, RETRY_SECONDS, () => {
-            this._retrySource = 0;
-            if (!this._proxy || !this._connected)
-                this.start();
-            return GLib.SOURCE_REMOVE;
-        });
+        let sourceId = 0;
+        try {
+            sourceId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, RETRY_SECONDS, () => {
+                if (this._retrySource === sourceId)
+                    this._retrySource = 0;
+                if (!this._isCurrent(generation))
+                    return GLib.SOURCE_REMOVE;
+                try {
+                    if (!this._proxy || !this._connected)
+                        this.start();
+                } catch (error) {
+                    if (this._isCurrent(generation))
+                        this._handleConnectionError(error);
+                }
+                return GLib.SOURCE_REMOVE;
+            });
+            this._retrySource = sourceId;
+        } catch (error) {
+            if (this._isCurrent(generation))
+                this._setError(errorMessage(error, 'Pulse could not schedule a reconnect.'));
+        }
+    }
+
+    _isAlive() {
+        return !this._destroyed;
+    }
+
+    _isCurrent(generation) {
+        return this._isAlive() && generation === this._generation;
+    }
+
+    _isCurrentProxy(proxy, generation) {
+        if (!this._isCurrent(generation) || !proxy || this._proxy !== proxy)
+            return false;
+        try {
+            const owner = textOr(proxy.g_name_owner);
+            return Boolean(owner) && owner === this._proxyOwner;
+        } catch (_error) {
+            return false;
+        }
+    }
+
+    _invokeCallback(callback, ...args) {
+        if (!this._isAlive() || typeof callback !== 'function')
+            return;
+        try {
+            observeCallbackResult(callback(...args));
+        } catch (error) {
+            reportCallbackError(error);
+        }
+    }
+
+    _emitSafely(signalName, ...args) {
+        if (!this._isAlive())
+            return;
+        try {
+            this.emit(signalName, ...args);
+        } catch (error) {
+            reportCallbackError(error);
+        }
+    }
+
+    _runSafely(callback) {
+        if (!this._isAlive() || typeof callback !== 'function')
+            return;
+        try {
+            observeCallbackResult(callback());
+        } catch (error) {
+            reportCallbackError(error);
+        }
+    }
+
+    _cancelCancellable(cancellable) {
+        if (!cancellable)
+            return;
+        this._pendingCancellables.delete(cancellable);
+        try {
+            cancellable.cancel();
+        } catch (error) {
+            reportCallbackError(error);
+        }
+    }
+
+    _cancelPendingRequests() {
+        this._searchSequence++;
+        this._authSequence++;
+        this._searchCancellable = null;
+        this._refreshCancellable = null;
+        this._snapshotCancellable = null;
+        this._authCancellable = null;
+        this._viewCancellables.clear();
+        this._viewSequences.clear();
+        this._viewRequestOrder = [];
+        for (const cancellable of this._pendingCancellables)
+            this._cancelCancellable(cancellable);
+        this._pendingCancellables.clear();
+    }
+
+    _trackCancellable(cancellable) {
+        if (!cancellable)
+            return false;
+        if (this._pendingCancellables.size >= MAX_INFLIGHT_CALLS &&
+            !this._pendingCancellables.has(cancellable))
+            return false;
+        this._pendingCancellables.add(cancellable);
+        return true;
+    }
+
+    _detachProxy() {
+        for (const [object, id] of this._proxySignals) {
+            try {
+                object.disconnect(id);
+            } catch (_error) {
+                // Disconnection is best effort during bus teardown.
+            }
+        }
+        this._proxySignals = [];
+        this._proxy = null;
     }
 });
 

@@ -54,7 +54,7 @@ jobs:
         run: cargo fmt --all -- --check
 
   static:
-    name: Shell and extension static checks
+    name: Shell and extension checks
     runs-on: homelab
     timeout-minutes: 10
     steps:
@@ -63,6 +63,10 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+      - name: Set up Node for extension regression tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - name: Check shell syntax and style
         shell: bash
         run: |
@@ -97,17 +101,9 @@ jobs:
 
           mapfile -t js_files < <(find extension -type f -name '*.js' -print | sort)
           if (( ${#js_files[@]} > 0 )); then
-            if command -v gjs >/dev/null 2>&1; then
-              for file in "${js_files[@]}"; do
-                gjs --check "$file"
-              done
-            elif command -v node >/dev/null 2>&1; then
-              for file in "${js_files[@]}"; do
-                node --check "$file"
-              done
-            else
-              echo "::warning::Neither gjs nor node is available; JavaScript syntax validation was skipped"
-            fi
+            for file in "${js_files[@]}"; do
+              node --input-type=module --check < "$file"
+            done
           fi
 
           mapfile -t json_files < <(find extension -type f -name '*.json' -print | sort)
@@ -136,6 +132,24 @@ jobs:
               echo "::warning::glib-compile-schemas is unavailable; schema validation was skipped for $directory"
             fi
           done
+      - name: Exercise extension lifecycle and D-Bus failures
+        run: node --test tests/*.test.mjs
+      - name: Verify installer safety and data preservation
+        run: python3 tests/install-user.test.py
+
+  gnome-smoke:
+    name: GNOME 49 native lifecycle
+    runs-on: homelab-heavy
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Build isolated Fedora GNOME test environment
+        run: docker build -f tests/gnome-smoke/Dockerfile -t pulse-gnome-smoke .
+      - name: Exercise the extension in a private Shell session
+        run: docker run --rm --network=none --cpus=2 --memory=4g --pids-limit=512 -v "$PWD:/workspace:ro" pulse-gnome-smoke
 
   rust-clippy:
     name: Rust Clippy
