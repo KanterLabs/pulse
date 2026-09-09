@@ -40,6 +40,7 @@ async fn main() -> pulse_daemon::Result<()> {
                 &config.spotify.accounts_base_url,
                 config.spotify.scopes.clone(),
             )
+            .map(|client| client.with_redirect_port(config.spotify.redirect_port))
         })
         .transpose()?;
     let refresh_store = config.client_id().map(|client_id| {
@@ -73,27 +74,41 @@ async fn main() -> pulse_daemon::Result<()> {
         }
     }
     let connection = serve(Arc::clone(&state)).await?;
+    // A live process with a closed service connection is unreachable by the extension.
+    // Watch the connection independently of refresh work and the configured poll interval;
+    // returning an error lets the user unit's Restart=on-failure rebuild both D-Bus clients.
+    tokio::select! {
+        () = connection.closed() => Err(zbus::Error::Failure(
+            "session D-Bus connection closed; exiting for service restart".into(),
+        ).into()),
+        result = refresh_playback(
+            &state,
+            &connection,
+            Duration::from_secs(config.server.poll_interval_seconds.max(1)),
+        ) => result,
+    }
+}
+
+async fn refresh_playback(
+    state: &DaemonState,
+    connection: &zbus::Connection,
+    poll_interval: Duration,
+) -> pulse_daemon::Result<()> {
     match state.refresh().await {
         Ok(snapshot) => {
-            if let Err(error) = emit_snapshot_update(&connection, snapshot).await {
-                eprintln!("initial playback signal failed: {error}");
-            }
+            emit_snapshot_update(connection, snapshot).await?;
         }
         Err(error) => eprintln!("initial playback refresh failed: {error}"),
     }
     eprintln!("pulse-daemon backend initialized");
-    let mut interval = tokio::time::interval(Duration::from_secs(
-        config.server.poll_interval_seconds.max(1),
-    ));
+    let mut interval = tokio::time::interval(poll_interval);
     // The first Tokio interval tick is immediate; the explicit refresh above already supplied it.
     interval.tick().await;
     loop {
         interval.tick().await;
         match state.refresh().await {
             Ok(snapshot) => {
-                if let Err(error) = emit_snapshot_update(&connection, snapshot).await {
-                    eprintln!("playback signal failed: {error}");
-                }
+                emit_snapshot_update(connection, snapshot).await?;
             }
             Err(error) => eprintln!("playback refresh failed: {error}"),
         }
