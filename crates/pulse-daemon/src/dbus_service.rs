@@ -144,10 +144,19 @@ impl DaemonState {
 
     #[must_use]
     pub fn health(&self) -> HealthSnapshot {
-        self.health
+        let mut health = self
+            .health
             .read()
             .map(|health| health.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // The token is restored after DaemonState construction during startup, and can also be
+        // refreshed lazily before an API request. Derive this field from the client so Health and
+        // GetAuthState cannot disagree about the current authentication state.
+        health.spotify_authenticated = self
+            .spotify
+            .as_ref()
+            .is_some_and(SpotifyClient::is_authenticated);
+        health
     }
 
     #[must_use]
@@ -1432,6 +1441,21 @@ mod tests {
         assert_eq!(dbus.status(), "disconnected");
         assert_eq!(dbus.state().snapshot().status, PlaybackStatus::Disconnected);
         assert!(dbus.state().snapshot().offline);
+    }
+
+    #[test]
+    fn health_reflects_a_token_restored_after_state_construction() {
+        let spotify = SpotifyClient::new("test-client").unwrap();
+        let state = DaemonState::new(None, Some(spotify.clone()), None);
+        assert!(!state.health().spotify_authenticated);
+
+        spotify
+            .set_token(TokenSet::new("access-token", "Bearer", None, 3_600))
+            .unwrap();
+
+        assert!(state.health().spotify_authenticated);
+        spotify.clear_token().unwrap();
+        assert!(!state.health().spotify_authenticated);
     }
 
     #[test]
