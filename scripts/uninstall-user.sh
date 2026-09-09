@@ -21,6 +21,8 @@ Usage: scripts/uninstall-user.sh [--purge] [--dry-run]
 Removes Pulse's per-user binary, GNOME extension, D-Bus activation file, and
 systemd user unit.  Config, database, refresh-token storage, artwork, and
 other runtime state are preserved by default.
+If the extension is installed, GNOME must confirm it is inactive before any
+installed files are removed. Run from a working GNOME session.
 
 Options:
   --purge       additionally remove config, data, cache, and state directories
@@ -64,12 +66,34 @@ BIN_PATH="$(pulse_bin_dir)/pulse-daemon"
 EXTENSION_PATH=$(pulse_extension_dir)
 DBUS_PATH="$(pulse_dbus_service_dir)/$(pulse_dbus_service_name)"
 SYSTEMD_PATH="$(pulse_systemd_user_dir)/$(pulse_unit_name)"
+extension_installed=0
+if [[ -e "$EXTENSION_PATH" || -L "$EXTENSION_PATH" ]]; then
+    extension_installed=1
+fi
 
 if [[ "$PURGE" -eq 1 ]]; then
     pulse_assert_purge_target "$CONFIG_DIR"
     pulse_assert_purge_target "$DATA_DIR"
     pulse_assert_purge_target "$CACHE_DIR"
     pulse_assert_purge_target "$STATE_DIR"
+fi
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    if [[ "$extension_installed" -eq 1 ]]; then
+        pulse_info 'would disable pulse@kanterlabs in GNOME and verify that it is inactive'
+    fi
+else
+    if [[ "$extension_installed" -eq 1 ]]; then
+        if ! pulse_have_command gnome-extensions; then
+            pulse_die "gnome-extensions is unavailable; refusing to remove active extension files at $EXTENSION_PATH"
+        fi
+        if ! gnome-extensions disable "$(pulse_uuid)" >/dev/null 2>&1; then
+            pulse_die "could not disable GNOME extension $(pulse_uuid); refusing to remove $EXTENSION_PATH. The installed files and runtime data were left unchanged"
+        fi
+        if ! pulse_verify_extension_inactive; then
+            pulse_die "could not confirm GNOME extension $(pulse_uuid) is inactive; refusing to remove $EXTENSION_PATH. The installed files and runtime data were left unchanged"
+        fi
+    fi
 fi
 
 pulse_info 'stopping Pulse integration for the current user'
@@ -80,14 +104,6 @@ elif pulse_user_systemd_available; then
         pulse_warn 'pulse-daemon.service was not enabled or could not be stopped'
 else
     pulse_warn 'systemd --user is unavailable; remove any manually started daemon before uninstalling'
-fi
-
-if pulse_have_command gnome-extensions; then
-    if [[ "$DRY_RUN" -eq 1 ]]; then
-        pulse_info 'would disable pulse@kanterlabs in GNOME'
-    else
-        gnome-extensions disable "$(pulse_uuid)" >/dev/null 2>&1 || true
-    fi
 fi
 
 pulse_remove_file "$BIN_PATH"

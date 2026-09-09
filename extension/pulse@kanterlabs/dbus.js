@@ -448,6 +448,31 @@ function unpackValues(parameters) {
     }
 }
 
+function hasProperty(properties, name) {
+    if (properties === null || properties === undefined)
+        return false;
+
+    let value = properties;
+    try {
+        if (typeof properties.deep_unpack === 'function')
+            value = properties.deep_unpack();
+    } catch (_error) {
+        return false;
+    }
+
+    if (Array.isArray(value)) {
+        if (value.length === 1 && value[0] && typeof value[0] === 'object' &&
+            !Array.isArray(value[0]))
+            return hasProperty(value[0], name);
+        return value.some(entry => Array.isArray(entry)
+            ? entry[0] === name
+            : entry === name);
+    }
+    if (value instanceof Map)
+        return value.has(name);
+    return typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, name);
+}
+
 function errorMessage(error, fallback = 'Pulse could not complete that action.') {
     return textOr(error?.message, fallback);
 }
@@ -494,6 +519,7 @@ export const PulseConnection = GObject.registerClass({
         this._searchSequence = 0;
         this._refreshCancellable = null;
         this._snapshotCancellable = null;
+        this._snapshotSequence = 0;
         this._viewCancellables = new Map();
         this._viewSequences = new Map();
         this._viewRequestOrder = [];
@@ -854,8 +880,9 @@ export const PulseConnection = GObject.registerClass({
             ]);
             this._proxySignals.push([
                 proxy,
-                proxy.connect('g-properties-changed', () => {
-                    this._runSafely(() => this._readCachedSnapshot(proxy, generation));
+                proxy.connect('g-properties-changed', (_proxy, changedProperties, invalidatedProperties) => {
+                    this._runSafely(() => this._readCachedSnapshot(
+                        proxy, generation, changedProperties, invalidatedProperties));
                 }),
             ]);
             this._proxySignals.push([
@@ -921,7 +948,8 @@ export const PulseConnection = GObject.registerClass({
     _requestSnapshot() {
         if (!this._isAlive())
             return;
-        this._cancelCancellable(this._snapshotCancellable);
+        this._invalidateSnapshotRequest();
+        const sequence = this._snapshotSequence;
         const cancellable = new Gio.Cancellable();
         this._snapshotCancellable = cancellable;
         const clear = () => {
@@ -930,21 +958,37 @@ export const PulseConnection = GObject.registerClass({
         };
         this._call('GetSnapshot', new GLib.Variant('()', []), reply => {
             clear();
+            if (sequence !== this._snapshotSequence)
+                return;
             const raw = unpackFirst(reply);
             if (raw !== null && this._isAlive())
                 this._setSnapshot(normalizeSnapshot(raw));
         }, cancellable, () => clear());
     }
 
-    _readCachedSnapshot(proxy = this._proxy, generation = this._generation) {
+    _readCachedSnapshot(
+        proxy = this._proxy,
+        generation = this._generation,
+        changedProperties = undefined,
+        invalidatedProperties = undefined) {
         if (!this._isCurrentProxy(proxy, generation))
             return;
+        const hasChangedPlayback = hasProperty(changedProperties, 'Playback');
+        const hasInvalidatedPlayback = hasProperty(invalidatedProperties, 'Playback');
+        if (changedProperties !== undefined || invalidatedProperties !== undefined) {
+            if (!hasChangedPlayback && !hasInvalidatedPlayback)
+                return;
+            if (hasInvalidatedPlayback && !hasChangedPlayback) {
+                this._requestSnapshot();
+                return;
+            }
+        }
 
         try {
             const value = proxy.get_cached_property('Playback');
             const raw = unpackFirst(value);
             if (raw !== null && this._isCurrent(generation))
-                this._setSnapshot(normalizeSnapshot(raw));
+                this._applyAuthoritativeSnapshot(raw);
         } catch (_error) {
             // GetSnapshot remains authoritative with daemons that do not expose
             // a cached Playback property.
@@ -968,7 +1012,7 @@ export const PulseConnection = GObject.registerClass({
         case 'PlaybackChanged': {
             const raw = unpackFirst(parameters);
             if (raw !== null && this._isCurrent(generation))
-                this._setSnapshot(normalizeSnapshot(raw));
+                this._applyAuthoritativeSnapshot(raw);
             break;
         }
         case 'ErrorChanged': {
@@ -1001,13 +1045,14 @@ export const PulseConnection = GObject.registerClass({
         try {
             hasOwner = Boolean(proxy?.g_name_owner);
         } catch (error) {
-            this._handleCallError(error);
+            this._handleCallError(error, cancellable);
             if (this._isAlive())
                 this._invokeCallback(onError, error);
             return false;
         }
         if (!proxy || !hasOwner) {
             const error = new Error('The Pulse daemon is offline.');
+            this._invalidateOwnerRequests(cancellable);
             this._setDisconnected(error.message);
             if (this._isAlive()) {
                 this._scheduleRetry();
@@ -1052,7 +1097,7 @@ export const PulseConnection = GObject.registerClass({
                             this._ownerEpoch !== ownerEpoch || this._proxy !== proxy ||
                             replyProxy !== proxy)
                             return;
-                        this._handleCallError(error);
+                        this._handleCallError(error, requestCancellable);
                         if (this._isAlive())
                             this._invokeCallback(onError, error);
                         return;
@@ -1066,7 +1111,7 @@ export const PulseConnection = GObject.registerClass({
             cleanup();
             if (!this._isCurrent(generation) || requestCancellable.is_cancelled?.())
                 return false;
-            this._handleCallError(error);
+            this._handleCallError(error, requestCancellable);
             if (this._isAlive())
                 this._invokeCallback(onError, error);
             return false;
@@ -1083,17 +1128,20 @@ export const PulseConnection = GObject.registerClass({
             this._scheduleRetry(this._generation);
     }
 
-    _handleCallError(error) {
+    _handleCallError(error, requestCancellable = null) {
         if (!this._isAlive())
             return;
         const message = errorMessage(error);
         this._setError(message);
         if (!this._isAlive())
             return;
-        if (error?.matches?.(Gio.DBusError, Gio.DBusError.SERVICE_UNKNOWN))
+        const serviceUnknown = Boolean(error?.matches?.(Gio.DBusError, Gio.DBusError.SERVICE_UNKNOWN));
+        if (serviceUnknown) {
+            this._invalidateOwnerRequests(requestCancellable);
             this._setDisconnected('The Pulse daemon is offline.');
-        if (this._isAlive() && error?.matches?.(Gio.DBusError, Gio.DBusError.SERVICE_UNKNOWN))
-            this._scheduleRetry(this._generation);
+            if (this._isAlive())
+                this._scheduleRetry(this._generation);
+        }
     }
 
     _setDisconnected(message) {
@@ -1102,6 +1150,7 @@ export const PulseConnection = GObject.registerClass({
         this._setError(message);
         if (!this._isAlive())
             return;
+        this._invalidateSnapshotRequest();
         this._setSnapshot(disconnectedSnapshot(message));
         if (!this._isAlive())
             return;
@@ -1232,19 +1281,52 @@ export const PulseConnection = GObject.registerClass({
         }
     }
 
-    _cancelPendingRequests() {
-        this._searchSequence++;
-        this._authSequence++;
-        this._searchCancellable = null;
-        this._refreshCancellable = null;
-        this._snapshotCancellable = null;
-        this._authCancellable = null;
-        this._viewCancellables.clear();
-        this._viewSequences.clear();
-        this._viewRequestOrder = [];
-        for (const cancellable of this._pendingCancellables)
+    _cancelPendingRequests(except = null) {
+        if (this._searchCancellable !== except) {
+            this._searchSequence++;
+            this._searchCancellable = null;
+        }
+        if (this._refreshCancellable !== except)
+            this._refreshCancellable = null;
+        if (this._snapshotCancellable !== except) {
+            this._snapshotSequence++;
+            this._snapshotCancellable = null;
+        }
+        if (this._authCancellable !== except) {
+            this._authSequence++;
+            this._authCancellable = null;
+        }
+        for (const [name, cancellable] of [...this._viewCancellables]) {
+            if (cancellable === except)
+                continue;
             this._cancelCancellable(cancellable);
+            this._viewCancellables.delete(name);
+            this._viewSequences.delete(name);
+        }
+        this._viewRequestOrder = this._viewRequestOrder.filter(name =>
+            this._viewCancellables.has(name));
+        for (const cancellable of this._pendingCancellables) {
+            if (cancellable !== except)
+                this._cancelCancellable(cancellable);
+        }
         this._pendingCancellables.clear();
+    }
+
+    _invalidateOwnerRequests(except = null) {
+        this._ownerEpoch++;
+        this._proxyOwner = null;
+        this._cancelPendingRequests(except);
+    }
+
+    _invalidateSnapshotRequest() {
+        this._snapshotSequence++;
+        this._cancelCancellable(this._snapshotCancellable);
+        this._snapshotCancellable = null;
+    }
+
+    _applyAuthoritativeSnapshot(raw) {
+        this._invalidateSnapshotRequest();
+        this._setSnapshot(normalizeSnapshot(raw));
     }
 
     _trackCancellable(cancellable) {

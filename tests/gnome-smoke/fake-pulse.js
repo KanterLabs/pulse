@@ -145,7 +145,11 @@ class PulseFixture {
         this._activeView = selected;
         const items = {
             home: this._items().slice(0, 2),
-            library: this._items(),
+            library: Array.from({length: 36}, (_, index) => ({
+                ...this._items()[index % 3],
+                name: `Library track ${index + 1}`,
+                uri: `spotify:track:pulse-smoke-library-${index + 1}`,
+            })),
             queue: this._items().slice(0, 1),
         }[selected] || [];
         const payload = {

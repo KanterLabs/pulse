@@ -382,12 +382,23 @@ class PulseIndicator extends PanelMenu.Button {
         this._pageBox.add_child(this._searchEntry);
         this._searchEntry.accessible_name = 'Search your music';
         this._searchEntry.get_clutter_text().connect('text-changed', () => this._scheduleSearch());
+        // A scrollable child lets PanelMenu constrain the menu to the monitor
+        // height even when a library page contains the maximum number of rows.
+        this._resultsScroll = new St.ScrollView({
+            style_class: 'pulse-results-scroll',
+            hscrollbar_policy: St.PolicyType.NEVER,
+            vscrollbar_policy: St.PolicyType.AUTOMATIC,
+            x_expand: true,
+        });
+        this._pageBox.add_child(this._resultsScroll);
+        const resultsContent = new St.BoxLayout({vertical: true, x_expand: true});
+        this._resultsScroll.set_child(resultsContent);
         this._resultsBox = new St.BoxLayout({
             vertical: true,
             style_class: 'pulse-search-results',
             x_expand: true,
         });
-        this._pageBox.add_child(this._resultsBox);
+        resultsContent.add_child(this._resultsBox);
         this._loadMoreButton = new St.Button({
             style_class: 'pulse-load-more-button',
             label: 'Load more',
@@ -396,8 +407,10 @@ class PulseIndicator extends PanelMenu.Button {
             track_hover: true,
             x_expand: true,
         });
-        this._pageBox.add_child(this._loadMoreButton);
+        resultsContent.add_child(this._loadMoreButton);
         this._loadMoreButton.accessible_name = 'Load more items';
+        this._loadMoreButton.connect('key-focus-in', () =>
+            this._ensureResultVisible(this._loadMoreButton));
         this._loadMoreButton.connect('clicked', () => {
             const data = this._viewData.get(this._view);
             if (data?.next_cursor)
@@ -797,6 +810,8 @@ class PulseIndicator extends PanelMenu.Button {
             subtitleLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
             details.add_child(subtitleLabel);
             button.accessible_name = `${title}, ${subtitle}`;
+            button.connect('key-focus-in', () =>
+                this._ensureResultVisible(button));
             button.connect('clicked', () => {
                 const uri = itemUri(item);
                 if (uri)
@@ -807,6 +822,23 @@ class PulseIndicator extends PanelMenu.Button {
             button.destroy();
             throw error;
         }
+    }
+
+    _ensureResultVisible(actor) {
+        if (this._destroyed)
+            return;
+        // GNOME 45 exposes the adjustment through the scrollbar; newer
+        // versions expose it directly on the scroll view.
+        const adjustment = this._resultsScroll.vadjustment ?? this._resultsScroll.vscroll.adjustment;
+        const [, scrollY] = this._resultsScroll.get_transformed_position();
+        const [, actorY] = actor.get_transformed_position();
+        const [, actorHeight] = actor.get_transformed_size();
+        const top = actorY - scrollY;
+        const bottom = top + actorHeight;
+        if (top < 0)
+            adjustment.value += top;
+        else if (bottom > adjustment.page_size)
+            adjustment.value += bottom - adjustment.page_size;
     }
 
     _scheduleSearch() {

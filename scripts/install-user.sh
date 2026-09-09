@@ -192,6 +192,13 @@ fi
 [[ -f "$SYSTEMD_TEMPLATE" ]] || pulse_die "systemd template not found: $SYSTEMD_TEMPLATE"
 [[ -f "$DBUS_TEMPLATE" ]] || pulse_die "D-Bus template not found: $DBUS_TEMPLATE"
 
+BIN_DEST="$BIN_DIR/pulse-daemon"
+SYSTEMD_DEST="$SYSTEMD_DIR/$(pulse_unit_name)"
+DBUS_DEST="$DBUS_DIR/$(pulse_dbus_service_name)"
+pulse_assert_file_destination "$BIN_DEST"
+pulse_assert_file_destination "$SYSTEMD_DEST"
+pulse_assert_file_destination "$DBUS_DEST"
+
 if [[ "$ENABLE_EXTENSION" -eq 1 && -z "$EXTENSION_SOURCE" ]]; then
     pulse_die '--enable-extension was requested, but no GNOME extension source is available'
 fi
@@ -232,7 +239,7 @@ disable_existing_extension() {
     fi
 
     if pulse_have_command gnome-extensions && gnome-extensions disable "$(pulse_uuid)" >/dev/null 2>&1; then
-        if [[ "$extension_destination_exists" -eq 1 ]] && ! verify_extension_inactive; then
+        if [[ "$extension_destination_exists" -eq 1 ]] && ! pulse_verify_extension_inactive; then
             pulse_die "could not confirm GNOME extension $(pulse_uuid) is inactive; refusing to replace $EXTENSION_DIR"
         fi
         if [[ "$extension_destination_exists" -eq 1 ]]; then
@@ -253,27 +260,6 @@ disable_existing_extension() {
     fi
 
     pulse_die "could not confirm GNOME extension $(pulse_uuid) is disabled; refusing to install $EXTENSION_DIR"
-}
-
-verify_extension_inactive() {
-    local info=''
-    local state=''
-    local attempt
-
-    # The CLI can return success after Shell accepts the request, even when
-    # the extension callback fails.  Require an explicit non-active state
-    # before replacing files or claiming rollback succeeded.
-    for ((attempt = 0; attempt < 30; attempt++)); do
-        info=$(LC_ALL=C gnome-extensions info "$(pulse_uuid)" 2>/dev/null) || info=''
-        state=$(printf '%s\n' "$info" | sed -n 's/^[[:space:]]*State: //p')
-        case "$state" in
-            DISABLED|INACTIVE|INITIALIZED|OUT_OF_DATE) return 0 ;;
-            ERROR|UNINSTALLED) break ;;
-        esac
-        sleep 0.1
-    done
-    pulse_warn "Pulse did not become inactive (state: ${state:-unavailable})"
-    return 1
 }
 
 verify_extension_active() {
@@ -357,7 +343,7 @@ atomic_install_rendered_file() {
         rm -f -- "$staged"
         pulse_die "could not set permissions on rendered file: $destination"
     fi
-    if ! mv -f -- "$staged" "$destination"; then
+    if ! mv -fT -- "$staged" "$destination"; then
         rm -f -- "$staged"
         pulse_die "could not install rendered file: $destination"
     fi
@@ -365,7 +351,7 @@ atomic_install_rendered_file() {
 
 disable_existing_extension
 mkdir -p -- "$BIN_DIR"
-pulse_install_file_atomic "$DAEMON_BINARY" "$BIN_DIR/pulse-daemon" 0755
+pulse_install_file_atomic "$DAEMON_BINARY" "$BIN_DEST" 0755
 
 if [[ -n "$EXTENSION_SOURCE" ]]; then
     atomic_install_extension "$EXTENSION_SOURCE" "$EXTENSION_DIR"
@@ -373,8 +359,8 @@ else
     pulse_warn 'extension source is absent; installed daemon and integration files only'
 fi
 
-atomic_install_rendered_file "$SYSTEMD_TEMPLATE" "$SYSTEMD_DIR/$(pulse_unit_name)" 0644
-atomic_install_rendered_file "$DBUS_TEMPLATE" "$DBUS_DIR/$(pulse_dbus_service_name)" 0644
+atomic_install_rendered_file "$SYSTEMD_TEMPLATE" "$SYSTEMD_DEST" 0644
+atomic_install_rendered_file "$DBUS_TEMPLATE" "$DBUS_DEST" 0644
 
 pulse_reload_user_integration "$CONFIG_HOME" "$DATA_HOME" "$CACHE_HOME"
 
@@ -408,7 +394,7 @@ if [[ "$NO_START" -eq 0 ]]; then
             pulse_info 'GNOME extension enabled and verified active'
         else
             if gnome-extensions disable "$(pulse_uuid)" >/dev/null 2>&1; then
-                if verify_extension_inactive; then
+                if pulse_verify_extension_inactive; then
                     pulse_die 'GNOME extension could not be activated; it was disabled again and remains installed. Log out and back in, then run: gnome-extensions enable pulse@kanterlabs; verify with: gnome-extensions info pulse@kanterlabs'
                 fi
                 pulse_die 'GNOME extension could not be enabled and its disabled state could not be confirmed. Inspect it with: gnome-extensions info pulse@kanterlabs; disable it before retrying'

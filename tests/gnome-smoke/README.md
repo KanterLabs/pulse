@@ -28,7 +28,9 @@ and GC/destroy warnings fail the test.
 The test keeps the sentinel enabled while it enables Pulse, waits through the
 absent-daemon reconnect timer, opens the connected popover, checks populated
 rows/artwork/progress, switches home/library/queue/search views, and forces GJS
-garbage collection. It kills and restarts the fixture once while Pulse remains
+garbage collection. The library contains 36 distinct rows: the test verifies
+that the menu fits the 720-pixel display and keyboard focus scrolls the last
+row into view. It kills and restarts the fixture once while Pulse remains
 enabled to cover owner loss and reconnection, then disables Pulse for each of
 ten cycles. Home omits `next_cursor`, library returns an empty cursor, and
 queue returns a real cursor so the load-more path is exercised in both states.
@@ -58,6 +60,10 @@ on the same GNOME 49.9 environment. The sentinel stayed active and the global
 extension setting stayed unchanged. The shutdown case initially exposed Pulse
 callbacks reaching disposed widgets; the extension now cleans up through the
 native panel destroy callback as well as its explicit disable method.
+
+The follow-up review reproduced a 2,342-pixel-tall library menu on the
+720-pixel display. The results now scroll within the available menu height;
+all ten native cycles pass with the populated library and last-row focus checks.
 
 This is native Shell/GObject coverage, not hardware validation. It cannot
 establish the cause of the reported laptop reboot or verify GPU drivers,
