@@ -14,6 +14,7 @@ pulse_require_non_root
 PROFILE=${PULSE_BUILD_PROFILE:-release}
 NO_BUILD=${PULSE_SKIP_BUILD:-0}
 NO_START=${PULSE_NO_START:-0}
+ENABLE_EXTENSION=${PULSE_ENABLE_EXTENSION:-0}
 DRY_RUN=${PULSE_DRY_RUN:-0}
 
 usage() {
@@ -28,6 +29,7 @@ Options:
   --debug               install the debug build
   --no-build            use an existing target artifact
   --no-start            install files without enabling/starting the daemon
+  --enable-extension    activate a fresh install; upgrades require logout/login
   --dry-run             print planned actions without writing or reloading
   -h, --help            show this help
 
@@ -55,6 +57,9 @@ while (($# > 0)); do
         --no-start)
             NO_START=1
             ;;
+        --enable-extension)
+            ENABLE_EXTENSION=1
+            ;;
         --dry-run)
             DRY_RUN=1
             ;;
@@ -73,6 +78,10 @@ done
 
 if [[ "$PROFILE" != release && "$PROFILE" != debug ]]; then
     pulse_die "unsupported build profile: $PROFILE (use release or debug)"
+fi
+
+if [[ "$NO_START" -eq 1 && "$ENABLE_EXTENSION" -eq 1 ]]; then
+    pulse_die '--enable-extension cannot be combined with --no-start; remove --no-start or enable the extension manually after installation'
 fi
 
 export PULSE_DRY_RUN=$DRY_RUN
@@ -134,6 +143,11 @@ pulse_info "D-Bus service destination: $DBUS_DIR/$(pulse_dbus_service_name)"
 pulse_info "systemd user unit destination: $SYSTEMD_DIR/$(pulse_unit_name)"
 pulse_info "runtime data is preserved under: $CONFIG_HOME/pulse, $DATA_HOME/pulse, and $CACHE_HOME/pulse"
 
+extension_destination_exists=0
+if [[ -e "$EXTENSION_DIR" || -L "$EXTENSION_DIR" ]]; then
+    extension_destination_exists=1
+fi
+
 if [[ "$DRY_RUN" -eq 1 ]]; then
     if [[ -n "${PULSE_DAEMON_BINARY:-}" ]]; then
         pulse_info "would install supplied daemon: $DAEMON_BINARY"
@@ -149,8 +163,26 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
         pulse_warn "systemd template is absent: $SYSTEMD_TEMPLATE"
     [[ -f "$DBUS_TEMPLATE" ]] && pulse_info "would render D-Bus template: $DBUS_TEMPLATE" ||
         pulse_warn "D-Bus template is absent: $DBUS_TEMPLATE"
+    if [[ -n "$EXTENSION_SOURCE" ]]; then
+        if [[ "$extension_destination_exists" -eq 1 ]]; then
+            pulse_info "would disable the existing GNOME extension before replacing it"
+        else
+            pulse_info "would ensure the GNOME extension is disabled before installation"
+        fi
+        if [[ "$ENABLE_EXTENSION" -eq 1 && "$extension_destination_exists" -eq 1 ]]; then
+            pulse_info 'would require logout/login before enabling the upgraded extension'
+        elif [[ "$ENABLE_EXTENSION" -eq 1 ]]; then
+            pulse_info 'would enable the GNOME extension (--enable-extension)'
+        else
+            pulse_info 'would leave the GNOME extension disabled (pass --enable-extension to activate it)'
+        fi
+    elif [[ "$ENABLE_EXTENSION" -eq 1 ]]; then
+        pulse_warn 'extension source is absent; --enable-extension cannot activate the extension'
+    fi
     if [[ "$NO_START" -eq 0 ]]; then
-        pulse_info 'would enable/start pulse-daemon.service and enable the GNOME extension where available'
+        pulse_info 'would enable/start pulse-daemon.service'
+    else
+        pulse_info 'would skip pulse-daemon.service activation (--no-start)'
     fi
     exit 0
 fi
@@ -159,6 +191,114 @@ fi
 [[ -x "$DAEMON_BINARY" ]] || pulse_die "daemon binary is not executable: $DAEMON_BINARY"
 [[ -f "$SYSTEMD_TEMPLATE" ]] || pulse_die "systemd template not found: $SYSTEMD_TEMPLATE"
 [[ -f "$DBUS_TEMPLATE" ]] || pulse_die "D-Bus template not found: $DBUS_TEMPLATE"
+
+if [[ "$ENABLE_EXTENSION" -eq 1 && -z "$EXTENSION_SOURCE" ]]; then
+    pulse_die '--enable-extension was requested, but no GNOME extension source is available'
+fi
+if [[ "$ENABLE_EXTENSION" -eq 1 ]] && ! pulse_have_command gnome-extensions; then
+    pulse_die 'cannot enable the GNOME extension: gnome-extensions is unavailable; run the installer from a GNOME session or enable pulse@kanterlabs manually after installation'
+fi
+
+clear_enabled_extension_setting() {
+    local uuid
+    local enabled
+    local cleaned
+
+    pulse_have_command gsettings || return 1
+    uuid=$(pulse_uuid)
+    if ! enabled=$(gsettings get org.gnome.shell enabled-extensions 2>/dev/null); then
+        return 1
+    fi
+
+    # gnome-extensions uses the same GSettings key when GNOME Shell's D-Bus
+    # API is unavailable. Remove only this exact UUID and leave every other
+    # user extension untouched.
+    if [[ "$enabled" == *"'$uuid'"* ]]; then
+        cleaned=$(printf '%s\n' "$enabled" |
+            sed -e "s/'$uuid', //g" -e "s/, '$uuid'//g" -e "s/'$uuid'//g")
+        [[ "$cleaned" != *"'$uuid'"* ]] || return 1
+        if ! gsettings set org.gnome.shell enabled-extensions "$cleaned" >/dev/null 2>&1; then
+            return 1
+        fi
+    fi
+
+    enabled=$(gsettings get org.gnome.shell enabled-extensions 2>/dev/null) || return 1
+    [[ "$enabled" != *"'$uuid'"* ]]
+}
+
+disable_existing_extension() {
+    if [[ -z "$EXTENSION_SOURCE" ]]; then
+        return 0
+    fi
+
+    if pulse_have_command gnome-extensions && gnome-extensions disable "$(pulse_uuid)" >/dev/null 2>&1; then
+        if [[ "$extension_destination_exists" -eq 1 ]] && ! verify_extension_inactive; then
+            pulse_die "could not confirm GNOME extension $(pulse_uuid) is inactive; refusing to replace $EXTENSION_DIR"
+        fi
+        if [[ "$extension_destination_exists" -eq 1 ]]; then
+            pulse_info "existing GNOME extension $(pulse_uuid) disabled before replacement"
+        else
+            pulse_info "GNOME extension $(pulse_uuid) disabled before installation"
+        fi
+        return 0
+    fi
+
+    if [[ "$extension_destination_exists" -eq 1 ]]; then
+        pulse_die "could not disable existing GNOME extension $(pulse_uuid); refusing to replace $EXTENSION_DIR. The existing files were left unchanged; disable it from a working GNOME session and retry"
+    fi
+
+    if clear_enabled_extension_setting; then
+        pulse_warn "could not disable $(pulse_uuid) through GNOME Shell; confirmed its enabled setting is clear through GSettings"
+        return 0
+    fi
+
+    pulse_die "could not confirm GNOME extension $(pulse_uuid) is disabled; refusing to install $EXTENSION_DIR"
+}
+
+verify_extension_inactive() {
+    local info=''
+    local state=''
+    local attempt
+
+    # The CLI can return success after Shell accepts the request, even when
+    # the extension callback fails.  Require an explicit non-active state
+    # before replacing files or claiming rollback succeeded.
+    for ((attempt = 0; attempt < 30; attempt++)); do
+        info=$(LC_ALL=C gnome-extensions info "$(pulse_uuid)" 2>/dev/null) || info=''
+        state=$(printf '%s\n' "$info" | sed -n 's/^[[:space:]]*State: //p')
+        case "$state" in
+            DISABLED|INACTIVE|INITIALIZED|OUT_OF_DATE) return 0 ;;
+            ERROR|UNINSTALLED) break ;;
+        esac
+        sleep 0.1
+    done
+    pulse_warn "Pulse did not become inactive (state: ${state:-unavailable})"
+    return 1
+}
+
+verify_extension_active() {
+    local info
+    local state
+    local attempt
+
+    # The CLI reports that Shell accepted the enable request, even if enable()
+    # throws or the global extensions switch is off. Check the actual state.
+    for ((attempt = 0; attempt < 30; attempt++)); do
+        info=$(LC_ALL=C gnome-extensions info "$(pulse_uuid)" 2>/dev/null) || info=''
+        state=$(printf '%s\n' "$info" | sed -n 's/^[[:space:]]*State: //p')
+        case "$state" in
+            ACTIVE|ENABLED) return 0 ;;
+            ERROR|OUT_OF_DATE|UNINSTALLED) break ;;
+        esac
+        sleep 0.1
+    done
+    pulse_warn "Pulse did not become active (state: ${state:-unavailable})"
+    if pulse_have_command gsettings &&
+        [[ "$(gsettings get org.gnome.shell disable-user-extensions 2>/dev/null)" == true ]]; then
+        pulse_warn 'GNOME has turned off user extensions globally; check the Extensions app master switch after installing the repair and logging out/in'
+    fi
+    return 1
+}
 
 # Build each destination in its own parent filesystem.  This is important for
 # atomic rename: /tmp may be a different filesystem from the user's home.
@@ -223,6 +363,7 @@ atomic_install_rendered_file() {
     fi
 }
 
+disable_existing_extension
 mkdir -p -- "$BIN_DIR"
 pulse_install_file_atomic "$DAEMON_BINARY" "$BIN_DIR/pulse-daemon" 0755
 
@@ -255,17 +396,47 @@ if [[ "$NO_START" -eq 0 ]]; then
         pulse_warn 'systemd --user is unavailable; daemon was installed but not started'
     fi
 
-    if pulse_have_command gnome-extensions; then
-        if gnome-extensions enable "$(pulse_uuid)"; then
-            pulse_info 'GNOME extension enabled'
+    if [[ -n "$EXTENSION_SOURCE" && "$ENABLE_EXTENSION" -eq 1 ]]; then
+        if [[ "$extension_destination_exists" -eq 1 ]]; then
+            # GJS keeps imported modules for the life of the Shell process.
+            # Enabling here can execute the old code we just replaced, even
+            # after a successful disable and even on a second installer run.
+            pulse_info 'GNOME extension updated; log out and back in to load the new code'
+            pulse_info 'after logging back in, enable Pulse: gnome-extensions enable pulse@kanterlabs'
+            pulse_info 'then verify its State is ACTIVE or ENABLED: gnome-extensions info pulse@kanterlabs'
+        elif gnome-extensions enable "$(pulse_uuid)" && verify_extension_active; then
+            pulse_info 'GNOME extension enabled and verified active'
         else
-            pulse_warn 'GNOME extension could not be enabled in this session; run: gnome-extensions enable pulse@kanterlabs'
+            if gnome-extensions disable "$(pulse_uuid)" >/dev/null 2>&1; then
+                if verify_extension_inactive; then
+                    pulse_die 'GNOME extension could not be activated; it was disabled again and remains installed. Log out and back in, then run: gnome-extensions enable pulse@kanterlabs; verify with: gnome-extensions info pulse@kanterlabs'
+                fi
+                pulse_die 'GNOME extension could not be enabled and its disabled state could not be confirmed. Inspect it with: gnome-extensions info pulse@kanterlabs; disable it before retrying'
+            else
+                pulse_die 'GNOME extension could not be enabled and its disabled state could not be confirmed. Inspect it with: gnome-extensions info pulse@kanterlabs; disable it before retrying'
+            fi
         fi
-    else
-        pulse_warn 'gnome-extensions is unavailable; enable pulse@kanterlabs after logging into GNOME'
+    elif [[ -n "$EXTENSION_SOURCE" ]]; then
+        pulse_info 'GNOME extension installed but left disabled'
+        if [[ "$extension_destination_exists" -eq 1 ]]; then
+            pulse_info 'log out and back in before enabling Pulse so GNOME loads the updated code'
+            pulse_info 'enable after logging back in: gnome-extensions enable pulse@kanterlabs'
+        else
+            pulse_info 'enable Pulse once GNOME sees the fresh install: gnome-extensions enable pulse@kanterlabs'
+        fi
     fi
 else
-    pulse_info 'daemon/extension activation was skipped (--no-start)'
+    if [[ -n "$EXTENSION_SOURCE" ]]; then
+        pulse_info 'daemon activation was skipped (--no-start); GNOME extension remains disabled'
+        if [[ "$extension_destination_exists" -eq 1 ]]; then
+            pulse_info 'log out and back in before enabling Pulse so GNOME loads the updated code'
+            pulse_info 'enable after logging back in: gnome-extensions enable pulse@kanterlabs'
+        else
+            pulse_info 'enable Pulse once GNOME sees the fresh install: gnome-extensions enable pulse@kanterlabs'
+        fi
+    else
+        pulse_info 'daemon activation was skipped (--no-start)'
+    fi
 fi
 
 pulse_info 'installation complete'

@@ -97,10 +97,10 @@ Install or verify these before building:
 - the official Spotify desktop client, installed through Flatpak or RPM/native
   packaging, with MPRIS visible after Spotify starts.
 
-The optional development checks also use `shellcheck`, Node.js, and
-`glib-compile-schemas` when those tools are available. CI reports missing
-optional extension validators instead of silently pretending that validation
-ran.
+Development checks use Node.js for lifecycle regressions, Python 3 for
+installer tests, `shellcheck` for shell scripts, and `glib-compile-schemas`
+for settings validation. CI also runs an isolated native GNOME 49 lifecycle
+test; see [the stability repair notes](docs/STABILITY_VALIDATION.md).
 
 The usual Fedora development tools can be installed with your normal package
 manager, for example:
@@ -140,10 +140,47 @@ installs them under XDG locations, including:
 ```
 
 It reloads the user service manager and integration files, enables the daemon,
-and enables the extension where supported. Existing configuration, database,
-tokens, and artwork remain in place during an upgrade. If a script is absent
-in a checkout from before its milestone lands, follow the implementation plan
-and do not copy binaries or service files by hand.
+and starts it by default. The GNOME extension is installed disabled because
+this tree is pre-alpha; the installer never enables it implicitly. Before an
+extension install or upgrade, it disables that UUID through `gnome-extensions`,
+including a stale enabled setting left after an earlier copy was removed. If
+an existing extension directory is present and that command is unavailable,
+fails, or Shell does not confirm Pulse is inactive, the installer stops before
+replacing any installed file; the old tree and install destinations remain
+unchanged. It does not use a GSettings
+fallback when an old tree is present. When the destination is absent, the
+installer can remove only Pulse's UUID from the enabled-extension setting
+through `gsettings` and verifies that it is gone. If it cannot confirm the
+disabled state, it stops before writing the new extension. Existing
+configuration, database, tokens, artwork, and cache remain in place during an
+upgrade. If a script is absent in a checkout from before its milestone lands,
+follow the implementation plan and do not copy binaries or service files by
+hand.
+
+For the safest first run, install without starting the daemon:
+
+```bash
+./scripts/install-user.sh --no-start
+```
+
+After installation, log out and back in so GNOME loads the installed code.
+Then enable Pulse and check that its State is `ACTIVE` or `ENABLED`:
+
+```bash
+gnome-extensions enable pulse@kanterlabs
+gnome-extensions info pulse@kanterlabs
+```
+
+GNOME caches extension JavaScript until the Shell process ends. Disabling
+and re-enabling Pulse in the same session can execute the previous version,
+including a crash that has already been fixed on disk. Always log out/in
+after an upgrade before enabling it.
+
+For a fresh installation into a Shell session that can already discover the
+extension, `./scripts/install-user.sh --enable-extension` requests activation
+and checks the actual Shell state. On upgrades, this option installs the
+updated files and asks for logout/login before activation. It never enables
+the cached version. `--enable-extension` cannot be combined with `--no-start`.
 
 After installation, useful checks are:
 
@@ -153,6 +190,40 @@ busctl --user introspect io.kanterlabs.Pulse /io/kanterlabs/Pulse
 gnome-extensions info pulse@kanterlabs
 journalctl --user -u pulse-daemon.service --since today
 ```
+
+If an install or upgrade reports that it could not disable the existing
+extension, do not remove runtime data. The installer has left the old
+extension tree and install destinations unchanged. From a working GNOME
+session, disable the UUID manually and retry:
+
+```bash
+gnome-extensions disable pulse@kanterlabs
+./scripts/install-user.sh
+```
+
+If GNOME is unavailable after the extension was explicitly enabled, switch to
+a text console. This is an explicit recovery command; the installer does not
+quarantine an existing extension automatically. Move only the installed
+extension outside GNOME Shell's search path into a unique quarantine, while
+leaving Pulse runtime data in place:
+
+```bash
+data_home=${XDG_DATA_HOME:-$HOME/.local/share}
+extension_dir="$data_home/gnome-shell/extensions/pulse@kanterlabs"
+quarantine_parent="$data_home/pulse-extension-quarantine"
+mkdir -p -- "$quarantine_parent"
+quarantine_dir=$(mktemp -d "$quarantine_parent/pulse@kanterlabs.XXXXXX")
+mv -- "$extension_dir" "$quarantine_dir/"
+printf 'quarantined extension: %s\n' "$quarantine_dir/pulse@kanterlabs"
+```
+
+Log out and back in before retrying the installer without
+`--enable-extension`. This recovery procedure does not by itself establish
+the cause of a reboot or other laptop failure. The default uninstall also
+leaves the database,
+configuration, OAuth tokens, artwork, and cache untouched; only
+`./scripts/uninstall-user.sh --purge` removes those directories after its
+explicit safety checks.
 
 For development synchronization, use `./scripts/dev-sync.sh` only when that
 script is present and read its `--help` output first. To remove an install
@@ -221,6 +292,11 @@ journalctl --since today /usr/bin/gnome-shell
 
 Common causes:
 
+- **All GNOME extensions were turned off:** GNOME can do this after a Shell
+  crash during startup. Install the repaired Pulse source, log out/in, and
+  check the master switch in the Extensions app before enabling Pulse.
+  The doctor reports this switch and Pulse's actual state. See the
+  [repair procedure](docs/TROUBLESHOOTING.md#all-gnome-extensions-get-turned-off).
 - **The panel indicator is missing:** verify the UUID with
   `gnome-extensions info pulse@kanterlabs`, confirm that your GNOME major
   version is supported, and log out/in if the shell did not reload the

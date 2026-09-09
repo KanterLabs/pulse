@@ -125,7 +125,7 @@ The install script will:
 1. Refuse to run as root.
 2. Copy into staging paths and atomically rename completed artifacts.
 3. reload the systemd user manager and D-Bus configuration as needed.
-4. enable/start the daemon and enable the extension.
+4. enable/start the daemon, leaving the extension disabled unless activation is explicitly requested; disable an existing extension before replacing its files.
 5. leave existing config, database, tokens, and artwork intact on upgrades.
 6. print exact rollback and diagnostic commands if validation fails.
 
