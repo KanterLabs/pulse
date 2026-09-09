@@ -231,6 +231,9 @@ without deleting user data, use `./scripts/uninstall-user.sh`. Data deletion
 requires the explicit `./scripts/uninstall-user.sh --purge` option after
 checking its target and preserving any backup; the default uninstall does not
 remove the database, configuration, OAuth tokens, or artwork.
+Uninstall first disables Pulse and confirms that the extension stopped. If
+GNOME cannot confirm this, the installed files remain intact; retry from a
+working GNOME session.
 
 ## Spotify Developer app and PKCE setup
 

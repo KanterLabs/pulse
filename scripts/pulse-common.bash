@@ -226,14 +226,14 @@ pulse_replace_tree_atomic() {
     if [[ -e "$destination" || -L "$destination" ]]; then
         backup=$(mktemp -d "$parent/.pulse-old.XXXXXX")
         rmdir -- "$backup"
-        if ! mv -- "$destination" "$backup"; then
+        if ! mv -T -- "$destination" "$backup"; then
             rmdir -- "$backup" 2>/dev/null || true
             pulse_die "could not stage existing path for replacement: $destination"
         fi
         backup_created=1
     fi
 
-    if mv -- "$source" "$destination"; then
+    if mv -T -- "$source" "$destination"; then
         if [[ "$backup_created" -eq 1 ]]; then
             rm -rf -- "$backup"
         fi
@@ -241,7 +241,7 @@ pulse_replace_tree_atomic() {
     fi
 
     if [[ "$backup_created" -eq 1 ]]; then
-        mv -- "$backup" "$destination" 2>/dev/null ||
+        mv -T -- "$backup" "$destination" 2>/dev/null ||
             pulse_warn "rollback failed; previous path is at $backup"
     fi
     pulse_die "could not install staged path: $destination"
@@ -266,7 +266,7 @@ pulse_install_file_atomic() {
         pulse_die "could not stage file: $source"
     fi
     chmod "$mode" "$temporary"
-    if ! mv -f -- "$temporary" "$destination"; then
+    if ! mv -fT -- "$temporary" "$destination"; then
         rm -f -- "$temporary"
         pulse_die "could not install file: $destination"
     fi
@@ -358,6 +358,36 @@ pulse_session_bus_available() {
 pulse_user_systemd_available() {
     pulse_have_command systemctl || return 1
     systemctl --user show-environment >/dev/null 2>&1
+}
+
+pulse_verify_extension_inactive() {
+    local info=''
+    local state=''
+    local attempt
+
+    # The CLI can return success after Shell accepts the request, even when
+    # the extension callback fails.  Require an explicit non-active state
+    # before replacing or removing files or claiming rollback succeeded.
+    for ((attempt = 0; attempt < 30; attempt++)); do
+        info=$(LC_ALL=C gnome-extensions info "$(pulse_uuid)" 2>/dev/null) || info=''
+        state=$(printf '%s\n' "$info" | sed -n 's/^[[:space:]]*State: //p')
+        case "$state" in
+            DISABLED|INACTIVE|INITIALIZED|OUT_OF_DATE) return 0 ;;
+            ERROR|UNINSTALLED) break ;;
+        esac
+        sleep 0.1
+    done
+    pulse_warn "Pulse did not become inactive (state: ${state:-unavailable})"
+    return 1
+}
+
+pulse_assert_file_destination() {
+    local path=$1
+
+    if [[ -e "$path" || -L "$path" ]] &&
+        [[ ! -f "$path" && ! -L "$path" ]]; then
+        pulse_die "refusing to replace non-file destination: $path"
+    fi
 }
 
 pulse_reload_user_integration() {

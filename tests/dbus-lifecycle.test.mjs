@@ -22,6 +22,10 @@ function replyFor(request, value) {
     request.callback(request.proxy, {reply: new Gio.Variant('()', [value])});
 }
 
+function errorFor(request, error) {
+    request.callback(request.proxy, {error});
+}
+
 test('destroy invalidates delayed proxy initialization and public methods', () => {
     const connection = new PulseConnection();
     let signalCount = 0;
@@ -139,6 +143,150 @@ test('direct daemon replacement clears old UI actions before reconnecting', () =
     connection.connect('connection-changed', (_connection, connected) => transitions.push(connected));
     proxy.loseOwner('replacement-owner');
     assert.deepEqual(transitions, [false, true]);
+    connection.destroy();
+});
+
+test('service loss invalidates late replies while preserving the failing callback and recovery', () => {
+    const connection = new PulseConnection();
+    const searchResults = [];
+    const loginErrors = [];
+    connection.connect('search-results', (_connection, payload) => searchResults.push(payload));
+
+    connection.start();
+    const proxy = proxyResult(new Gio.FakeProxy('owner'));
+    const initialCalls = Gio.testBus.pendingCalls.splice(0);
+    for (const request of initialCalls)
+        replyFor(request, '{}');
+
+    connection.search('stale after service loss');
+    const oldSearch = Gio.testBus.pendingCalls.shift();
+    assert.ok(oldSearch);
+    connection.beginLogin(null, error => loginErrors.push(error));
+    const failedLogin = Gio.testBus.pendingCalls.shift();
+    assert.ok(failedLogin);
+
+    const serviceUnknown = {
+        message: 'The Pulse daemon disappeared.',
+        matches: () => true,
+    };
+    errorFor(failedLogin, serviceUnknown);
+
+    assert.equal(connection.connected, false);
+    assert.equal(oldSearch.cancellable.is_cancelled(), true);
+    assert.equal(loginErrors.length, 1);
+    replyFor(oldSearch, '{"items":[{"name":"stale"}]}');
+    assert.equal(searchResults.length, 0);
+
+    const retryId = connection._retrySource;
+    assert.ok(retryId);
+    const retryCallback = GLib.getSource(retryId)?.callback;
+    retryCallback?.();
+    const pendingProxy = Gio.testBus.pendingProxy.shift();
+    assert.ok(pendingProxy);
+    const replacement = new Gio.FakeProxy('replacement-owner');
+    pendingProxy.callback(null, {proxy: replacement});
+    assert.equal(connection.connected, true);
+
+    const reconnectCalls = Gio.testBus.pendingCalls.splice(0);
+    for (const request of reconnectCalls)
+        replyFor(request, '{}');
+    connection.search('fresh after recovery');
+    const freshSearch = Gio.testBus.pendingCalls.shift();
+    assert.ok(freshSearch);
+    replyFor(freshSearch, '{"items":[{"name":"fresh"}]}');
+    assert.equal(searchResults.length, 1);
+    assert.match(searchResults[0], /fresh/);
+    connection.destroy();
+});
+
+test('authoritative snapshot data cancels stale replies and later requests recover', () => {
+    const connection = new PulseConnection();
+    connection.start();
+    const proxy = proxyResult(new Gio.FakeProxy('owner'));
+    const initialCalls = Gio.testBus.pendingCalls.splice(0);
+    const initialSnapshot = initialCalls.find(request => request.method === 'GetSnapshot');
+    assert.ok(initialSnapshot);
+    const initialAuth = initialCalls.find(request => request.method === 'GetAuthState');
+    assert.ok(initialAuth);
+    replyFor(initialAuth, '{}');
+
+    proxy.emitSignal('SnapshotChanged', new Gio.Variant('s', ['{"title":"new signal"}']));
+    assert.equal(initialSnapshot.cancellable.is_cancelled(), true);
+    replyFor(initialSnapshot, '{"title":"old reply"}');
+    assert.equal(connection.snapshot.title, 'new signal');
+
+    connection.refresh();
+    const refresh = Gio.testBus.pendingCalls.shift();
+    assert.equal(refresh?.method, 'Refresh');
+    replyFor(refresh, '');
+    const explicitSnapshot = Gio.testBus.pendingCalls.shift();
+    assert.equal(explicitSnapshot?.method, 'GetSnapshot');
+    proxy.setCachedPlayback('{"title":"cached property"}');
+    assert.equal(explicitSnapshot.cancellable.is_cancelled(), true);
+    replyFor(explicitSnapshot, '{"title":"late explicit"}');
+    assert.equal(connection.snapshot.title, 'cached property');
+
+    connection.refresh();
+    const secondRefresh = Gio.testBus.pendingCalls.shift();
+    assert.equal(secondRefresh?.method, 'Refresh');
+    replyFor(secondRefresh, '');
+    const recoverySnapshot = Gio.testBus.pendingCalls.shift();
+    assert.equal(recoverySnapshot?.method, 'GetSnapshot');
+    replyFor(recoverySnapshot, '{"title":"recovered"}');
+    assert.equal(connection.snapshot.title, 'recovered');
+    connection.destroy();
+});
+
+test('unrelated property changes do not invalidate an explicit snapshot request', () => {
+    const connection = new PulseConnection();
+    connection.start();
+    const proxy = proxyResult(new Gio.FakeProxy('owner'));
+    const initialCalls = Gio.testBus.pendingCalls.splice(0);
+    const initialSnapshot = initialCalls.find(request => request.method === 'GetSnapshot');
+    assert.ok(initialSnapshot);
+    replyFor(initialSnapshot, '{"title":"initial"}');
+    const initialAuth = initialCalls.find(request => request.method === 'GetAuthState');
+    assert.ok(initialAuth);
+    replyFor(initialAuth, '{}');
+
+    proxy.emitSignal('SnapshotChanged', new Gio.Variant('s', ['{"title":"signal"}']));
+    assert.equal(connection.snapshot.title, 'signal');
+
+    connection.refresh();
+    const refresh = Gio.testBus.pendingCalls.shift();
+    assert.equal(refresh?.method, 'Refresh');
+    replyFor(refresh, '');
+    const explicitSnapshot = Gio.testBus.pendingCalls.shift();
+    assert.equal(explicitSnapshot?.method, 'GetSnapshot');
+    proxy.cachedPlayback = '{"title":"stale cached property"}';
+    proxy.emitPropertiesChanged({Status: new Gio.Variant('s', ['ready'])});
+    assert.equal(explicitSnapshot.cancellable.is_cancelled(), false);
+    assert.equal(connection.snapshot.title, 'signal');
+
+    replyFor(explicitSnapshot, '{"title":"explicit"}');
+    assert.equal(connection.snapshot.title, 'explicit');
+    connection.destroy();
+});
+
+test('invalidated playback cache requests a fresh snapshot', () => {
+    const connection = new PulseConnection();
+    connection.start();
+    const proxy = proxyResult(new Gio.FakeProxy('owner'));
+    const initialCalls = Gio.testBus.pendingCalls.splice(0);
+    const oldSnapshot = initialCalls.find(request => request.method === 'GetSnapshot');
+    assert.ok(oldSnapshot);
+    const initialAuth = initialCalls.find(request => request.method === 'GetAuthState');
+    assert.ok(initialAuth);
+    replyFor(initialAuth, '{}');
+
+    proxy.cachedPlayback = null;
+    proxy.emitPropertiesChanged({}, ['Playback']);
+    assert.equal(oldSnapshot.cancellable.is_cancelled(), true);
+    const freshSnapshot = Gio.testBus.pendingCalls.shift();
+    assert.equal(freshSnapshot?.method, 'GetSnapshot');
+    assert.notEqual(freshSnapshot, oldSnapshot);
+    replyFor(freshSnapshot, '{"title":"fresh after cache invalidation"}');
+    assert.equal(connection.snapshot.title, 'fresh after cache invalidation');
     connection.destroy();
 });
 

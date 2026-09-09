@@ -196,7 +196,25 @@ for cycle in $(seq 1 10); do
     wait_eval 'Main.panel.statusArea["pulse@kanterlabs"]._snapshot.playing === true && Main.panel.statusArea["pulse@kanterlabs"]._progressSource !== 0'
 
     evaluate 'Main.panel.statusArea["pulse@kanterlabs"]._setView("library"); true;'
-    wait_eval 'Main.panel.statusArea["pulse@kanterlabs"]._view === "library" && Main.panel.statusArea["pulse@kanterlabs"]._viewData.get("library") !== undefined && Main.panel.statusArea["pulse@kanterlabs"]._viewData.get("library").items.length >= 3 && Main.panel.statusArea["pulse@kanterlabs"]._loadMoreButton.visible === false'
+    wait_eval 'Main.panel.statusArea["pulse@kanterlabs"]._view === "library" && Main.panel.statusArea["pulse@kanterlabs"]._viewData.get("library")?.items.length === 36 && Main.panel.statusArea["pulse@kanterlabs"]._resultsBox.get_n_children() === 36 && Main.panel.statusArea["pulse@kanterlabs"]._loadMoreButton.visible === false'
+    # A real library used to grow the menu far below the bottom of a laptop
+    # screen. Check allocation and keyboard access, not just the row count.
+    wait_eval '(() => {
+        const menu = Main.panel.statusArea["pulse@kanterlabs"].menu.actor;
+        const [, y] = menu.get_transformed_position();
+        const [, height] = menu.get_transformed_size();
+        return height > 0 && y >= 0 && y + height <= global.stage.height;
+    })()'
+    evaluate 'Main.panel.statusArea["pulse@kanterlabs"]._resultsBox.get_last_child().grab_key_focus(); true;'
+    wait_eval '(() => {
+        const pulse = Main.panel.statusArea["pulse@kanterlabs"];
+        const last = pulse._resultsBox.get_last_child();
+        const [, y] = last.get_transformed_position();
+        const [, height] = last.get_transformed_size();
+        const [, scrollY] = pulse._resultsScroll.get_transformed_position();
+        const [, scrollHeight] = pulse._resultsScroll.get_transformed_size();
+        return last.has_key_focus() && y >= scrollY && y + height <= scrollY + scrollHeight;
+    })()'
     evaluate 'Main.panel.statusArea["pulse@kanterlabs"]._setView("queue"); true;'
     wait_eval 'Main.panel.statusArea["pulse@kanterlabs"]._view === "queue" && Main.panel.statusArea["pulse@kanterlabs"]._viewData.get("queue") !== undefined && Main.panel.statusArea["pulse@kanterlabs"]._viewData.get("queue").items.length >= 1 && Main.panel.statusArea["pulse@kanterlabs"]._loadMoreButton.visible === true'
     evaluate 'Main.panel.statusArea["pulse@kanterlabs"]._setView("search"); true;'

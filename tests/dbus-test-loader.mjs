@@ -74,9 +74,14 @@ export class FakeProxy {
 
     setCachedPlayback(raw) {
         this.cachedPlayback = raw;
+        this.emitPropertiesChanged({Playback: new Variant('s', [raw])});
+    }
+
+    emitPropertiesChanged(changed = {}, invalidated = []) {
+        const changedProperties = new Variant('a{sv}', [changed]);
         for (const {signal, callback} of this.handlers.values()) {
             if (signal === 'g-properties-changed')
-                callback(this);
+                callback(this, changedProperties, invalidated);
         }
     }
 
