@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pulse playback prototype</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/player.mjs"></script>
+</head>
+<body>
+<main>
+  <p class="eyebrow">PULSE · PLAYBACK PROTOTYPE</p>
+  <h1>Play here.</h1>
+  <p>Test Spotify playback with the desktop app closed. This prototype needs
+    a browser with protected-content support and a Spotify Premium account.</p>
+  <p id="runtime" role="status">Checking browser audio support…</p>
+  <section aria-labelledby="setup-title">
+    <h2 id="setup-title">Connect your account</h2>
+    <p>In your Spotify developer app, enable Web Playback SDK and register
+      <code id="callback">http://127.0.0.1:8888/callback</code>.</p>
+    <form id="login">
+      <label for="client-id">Public Spotify Client ID</label>
+      <input id="client-id" required pattern="[A-Fa-f0-9]{32}" maxlength="32" autocomplete="off" spellcheck="false">
+      <button id="connect" type="submit">Connect Spotify</button>
+    </form>
+    <button id="reconnect" hidden>Reconnect player</button>
+    <button id="logout" hidden>Sign out</button>
+    <p class="note">Credentials stay in memory. Restarting the prototype requires signing in again.</p>
+  </section>
+  <section aria-labelledby="player-title">
+    <h2 id="player-title">Listen</h2>
+    <p id="status" role="status" aria-live="polite">Starting…</p>
+    <p id="track">No track playing</p>
+    <form id="play">
+      <label for="track-link">Spotify track link</label>
+      <input id="track-link" type="text" required placeholder="https://open.spotify.com/track/…" spellcheck="false">
+      <button data-playback type="submit" disabled>Play here</button>
+    </form>
+    <div class="controls">
+      <button data-playback data-command="previousTrack" disabled>Previous</button>
+      <button data-playback data-command="pause" disabled>Pause</button>
+      <button data-playback data-command="resume" disabled>Resume</button>
+      <button data-playback data-command="nextTrack" disabled>Next</button>
+    </div>
+    <label for="position">Track position <output id="time">0:00 / 0:00</output></label>
+    <input data-playback id="position" type="range" min="0" max="0" value="0" step="1000" disabled>
+    <label for="volume">Volume</label>
+    <input data-playback id="volume" type="range" min="0" max="1" value="0.5" step="0.01" disabled>
+  </section>
+  <p class="note">Keep this player tab open during testing. Closing it stops audio.
+    Background playback and GNOME panel integration are not implemented yet.</p>
+</main>
+</body>
+</html>
