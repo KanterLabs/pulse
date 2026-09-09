@@ -116,3 +116,34 @@ tests, and 23 Rust tests, including the private-bus MPRIS integration test.
 The ten-cycle native GNOME suite, Rust formatting, Clippy, release build,
 ShellCheck, and strict schema checks also passed. The staged release extension
 files match the tested source.
+
+## Daemon connection loss and Spotify callback setup
+
+The laptop reported an active daemon repeatedly logging `Broken pipe` while
+the panel could not reach its API. Restarting that daemon restored the API
+connection. A private-bus regression reproduced the old daemon remaining alive
+after bus loss: the new test fails against the original `main.rs` because the
+process never exits, preventing the installed restart policy from running.
+
+The daemon now watches service connection closure independently of its initial
+refresh and polling interval, and returns an error so `Restart=on-failure`
+starts a new process. The regression uses a one-hour poll interval, requires
+an error exit within five seconds, restarts a private bus at the same address,
+and starts another real daemon using the same config and populated SQLite
+cache. The saved response and config survive both cycles.
+
+The Spotify Dashboard also rejected the documented no-port callback URI on
+the laptop. `spotify.redirect_port` now allows an explicit loopback port that
+matches the registered URI, such as `http://127.0.0.1:8888/callback`. Existing
+configs retain dynamic assignment when the setting is absent or zero. Tests
+exercise the actual callback socket, a valid callback, rejected OAuth state,
+an occupied port, repeated login, and logout followed by reuse of the port.
+
+The combined change passed 26 Rust tests, 31 Node tests, 20 installer tests,
+formatting, Clippy, and the release build. In an isolated Fedora 43 container,
+the release daemon loaded the configured port from TOML, exposed the matching
+authorization redirect through D-Bus, reused a pending login, and successfully
+started another login after logout. Two bus-loss/restart cycles exited with
+status 1 promptly and retained the test config and data. This test used a
+private bus, an empty keyring stub, and no external network; real Spotify
+authorization still requires the user's browser login on the laptop.

@@ -253,6 +253,7 @@ pub struct SpotifyClient {
     api_base_url: Url,
     accounts_base_url: Url,
     scopes: Vec<String>,
+    redirect_port: u16,
     token: Arc<RwLock<Option<TokenSet>>>,
     retry_policy: RetryPolicy,
     rate_limit_state: Arc<RwLock<RateLimitState>>,
@@ -303,6 +304,7 @@ impl SpotifyClient {
             api_base_url,
             accounts_base_url,
             scopes,
+            redirect_port: 0,
             token: Arc::new(RwLock::new(None)),
             retry_policy: RetryPolicy::default(),
             rate_limit_state: Arc::new(RwLock::new(RateLimitState::Clear)),
@@ -312,6 +314,13 @@ impl SpotifyClient {
     #[must_use]
     pub fn client_id(&self) -> &str {
         &self.client_id
+    }
+
+    /// Choose the loopback port registered with Spotify. Zero requests a dynamic port.
+    #[must_use]
+    pub fn with_redirect_port(mut self, port: u16) -> Self {
+        self.redirect_port = port;
+        self
     }
 
     #[must_use]
@@ -418,7 +427,10 @@ impl SpotifyClient {
         let client_id = self.client_id.clone();
         let accounts_base_url = self.accounts_base_url.clone();
         let scopes = self.scopes.clone();
-        async move { PkceLogin::begin(&client_id, &accounts_base_url, &scopes).await }
+        let redirect_port = self.redirect_port;
+        async move {
+            PkceLogin::begin_on_port(&client_id, &accounts_base_url, &scopes, redirect_port).await
+        }
     }
 
     pub async fn exchange_code(&self, login: &PkceLogin, code: &str) -> Result<TokenSet> {
@@ -720,12 +732,30 @@ impl PkceLogin {
         accounts_base_url: &Url,
         scopes: &[String],
     ) -> Result<Self> {
+        Self::begin_on_port(client_id, accounts_base_url, scopes, 0).await
+    }
+
+    async fn begin_on_port(
+        client_id: &str,
+        accounts_base_url: &Url,
+        scopes: &[String],
+        redirect_port: u16,
+    ) -> Result<Self> {
         if client_id.trim().is_empty() {
             return Err(PulseError::InvalidInput(
                 "Spotify client ID is empty".into(),
             ));
         }
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let listener = TcpListener::bind(("127.0.0.1", redirect_port))
+            .await
+            .map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!(
+                        "cannot listen for Spotify login on 127.0.0.1:{redirect_port}: {error}"
+                    ),
+                )
+            })?;
         let port = listener.local_addr()?.port();
         let redirect_uri = Url::parse(&format!("http://127.0.0.1:{port}/callback"))
             .map_err(|error| PulseError::InvalidInput(error.to_string()))?;
@@ -839,6 +869,7 @@ mod tests {
         PkceLogin, RateLimitState, RetryPolicy, SpotifyClient, TokenSet, sanitize_error_body,
     };
     use std::time::{Duration, SystemTime};
+    use tokio::net::TcpListener;
     use url::Url;
 
     #[test]
@@ -896,5 +927,69 @@ mod tests {
             Some("S256".into())
         );
         assert!(login.authorization_url.as_str().contains("127.0.0.1"));
+    }
+
+    #[tokio::test]
+    async fn configured_pkce_port_handles_callbacks_and_rejects_port_conflicts() {
+        let reserved = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = reserved.local_addr().unwrap().port();
+        let client = SpotifyClient::new("fixture-client")
+            .unwrap()
+            .with_redirect_port(port);
+        let error = client.begin_login().await.unwrap_err();
+        assert!(matches!(
+            error,
+            crate::PulseError::Io(ref error) if error.kind() == std::io::ErrorKind::AddrInUse
+        ));
+        drop(reserved);
+
+        // Exercise both a valid callback and state rejection through the actual loopback socket.
+        for valid_state in [true, false] {
+            let mut login = client.begin_login().await.unwrap();
+            let expected_redirect = format!("http://127.0.0.1:{port}/callback");
+            assert_eq!(login.redirect_uri.as_str(), expected_redirect);
+            assert_eq!(
+                login
+                    .authorization_url
+                    .query_pairs()
+                    .find(|(key, _)| key == "redirect_uri")
+                    .unwrap()
+                    .1,
+                expected_redirect
+            );
+            let mut callback = login.redirect_uri.clone();
+            callback.query_pairs_mut().extend_pairs([
+                (
+                    "state",
+                    if valid_state {
+                        login.state.as_str()
+                    } else {
+                        "wrong-state"
+                    },
+                ),
+                ("code", "fixture-code"),
+            ]);
+            let browser = async {
+                reqwest::Client::new()
+                    .get(callback)
+                    .timeout(Duration::from_secs(5))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+            };
+            let (code, status) =
+                tokio::join!(login.wait_for_callback(Duration::from_secs(5)), browser,);
+            if valid_state {
+                assert_eq!(code.unwrap(), "fixture-code");
+                assert_eq!(status, reqwest::StatusCode::OK);
+            } else {
+                assert!(matches!(
+                    code,
+                    Err(crate::PulseError::AuthenticationFailed(_))
+                ));
+                assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+            }
+        }
     }
 }

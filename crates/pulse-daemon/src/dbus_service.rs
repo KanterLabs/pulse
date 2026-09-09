@@ -13,7 +13,7 @@ use crate::cache::{ArtworkCache, CacheRepository, CachedResponse, unix_now};
 use crate::error::{PulseError, Result};
 use crate::model::{HealthSnapshot, HealthStatus, PlaybackSnapshot};
 use crate::mpris::MprisClient;
-use crate::spotify::{PkceLogin, RefreshTokenStore, SpotifyClient};
+use crate::spotify::{RefreshTokenStore, SpotifyClient};
 
 pub const BUS_NAME: &str = "io.kanterlabs.Pulse";
 pub const OBJECT_PATH: &str = "/io/kanterlabs/Pulse";
@@ -28,6 +28,12 @@ const MAX_TEXT_BYTES: usize = 2_048;
 const DEFAULT_API_TTL_SECONDS: u64 = 300;
 const DEFAULT_PAYLOAD_LIMIT: usize = 4 * 1024 * 1024;
 
+struct PendingLogin {
+    authorization_url: String,
+    generation: u64,
+    task: tokio::task::JoinHandle<()>,
+}
+
 #[derive(Clone)]
 pub struct DaemonState {
     snapshot: Arc<RwLock<PlaybackSnapshot>>,
@@ -40,7 +46,7 @@ pub struct DaemonState {
     artwork_http: reqwest::Client,
     artwork_limit: Arc<Semaphore>,
     refresh_store: Option<Arc<dyn RefreshTokenStore>>,
-    login: Arc<Mutex<Option<PkceLogin>>>,
+    login: Arc<Mutex<Option<PendingLogin>>>,
     login_generation: Arc<AtomicU64>,
     snapshot_ttl_seconds: u64,
     api_ttl_seconds: u64,
@@ -794,24 +800,31 @@ impl DaemonState {
             .as_ref()
             .ok_or_else(|| PulseError::InvalidInput("Spotify client ID is not configured".into()))?
             .clone();
-        let login = spotify.begin_login().await?;
+        let mut pending = self.login.lock().await;
+        if let Some(current) = pending.as_ref()
+            && current.generation == self.login_generation.load(Ordering::SeqCst)
+            && !current.task.is_finished()
+        {
+            // Reopen the current browser login instead of binding its fixed callback port twice.
+            return Ok(current.authorization_url.clone());
+        }
+        if let Some(previous) = pending.take() {
+            previous.task.abort();
+            // Wait for cancellation to drop the old listener before reusing its port.
+            let _ = previous.task.await;
+        }
+        let generation = self.login_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut login = spotify.begin_login().await?;
+        if self.login_generation.load(Ordering::SeqCst) != generation {
+            return Err(PulseError::AuthenticationFailed(
+                "login was canceled".into(),
+            ));
+        }
         let authorization_url = login.authorization_url.to_string();
         let state = Arc::clone(self);
-        let generation = self.login_generation.fetch_add(1, Ordering::SeqCst) + 1;
-        {
-            let mut current = self.login.lock().await;
-            *current = Some(login);
-        }
         // Keep the callback listener alive in the daemon and complete the token exchange in the
         // background. The browser-facing D-Bus method returns immediately.
-        tokio::spawn(async move {
-            let login = {
-                let mut current = state.login.lock().await;
-                current.take()
-            };
-            let Some(mut login) = login else {
-                return;
-            };
+        let task = tokio::spawn(async move {
             let result = async {
                 let code = login.wait_for_callback(Duration::from_secs(300)).await?;
                 if state.login_generation.load(Ordering::SeqCst) != generation {
@@ -855,6 +868,11 @@ impl DaemonState {
                 health.spotify_authenticated = true;
                 health.error = None;
             }
+        });
+        *pending = Some(PendingLogin {
+            authorization_url: authorization_url.clone(),
+            generation,
+            task,
         });
         Ok(authorization_url)
     }
@@ -1456,6 +1474,34 @@ mod tests {
         assert!(state.health().spotify_authenticated);
         spotify.clear_token().unwrap();
         assert!(!state.health().spotify_authenticated);
+    }
+
+    #[tokio::test]
+    async fn repeated_login_reuses_pending_attempt_and_logout_allows_the_same_port() {
+        let reserved = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = reserved.local_addr().unwrap().port();
+        drop(reserved);
+        let spotify = SpotifyClient::new("fixture-client")
+            .unwrap()
+            .with_redirect_port(port);
+        let state = Arc::new(DaemonState::new(None, Some(spotify), None));
+
+        let first = state.begin_login().await.unwrap();
+        assert_eq!(state.begin_login().await.unwrap(), first);
+        state.logout().unwrap();
+        let next = timeout(Duration::from_secs(5), state.begin_login())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(next, first, "logout must retire the old PKCE state");
+        let next = url::Url::parse(&next).unwrap();
+        assert_eq!(
+            next.query_pairs()
+                .find(|(key, _)| key == "redirect_uri")
+                .unwrap()
+                .1,
+            format!("http://127.0.0.1:{port}/callback")
+        );
     }
 
     #[test]
