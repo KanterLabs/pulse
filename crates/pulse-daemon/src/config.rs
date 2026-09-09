@@ -20,6 +20,8 @@ pub struct PulseConfig {
 pub struct SpotifyConfig {
     /// Public Spotify application ID. A client secret is deliberately unsupported for PKCE.
     pub client_id: Option<String>,
+    /// Loopback callback port registered in the dashboard; zero preserves dynamic assignment.
+    pub redirect_port: u16,
     pub scopes: Vec<String>,
     pub api_base_url: String,
     pub accounts_base_url: String,
@@ -46,6 +48,7 @@ impl Default for SpotifyConfig {
     fn default() -> Self {
         Self {
             client_id: None,
+            redirect_port: 0,
             scopes: vec![
                 "user-read-playback-state".into(),
                 "user-read-currently-playing".into(),
@@ -164,6 +167,7 @@ mod tests {
             !scope.contains("modify") && !scope.contains("write") && !scope.contains("delete")
         }));
         assert!(config.client_id().is_none());
+        assert_eq!(config.spotify.redirect_port, 0);
     }
 
     #[test]
@@ -178,6 +182,7 @@ mod tests {
         .unwrap();
         let mut config = PulseConfig::default();
         config.spotify.client_id = Some("public-id".into());
+        config.spotify.redirect_port = 8888;
         config.save(&paths).unwrap();
         assert!(is_safe_config_path(Path::new("/x/config.toml")));
         assert_eq!(PulseConfig::load(&paths).unwrap(), config);
