@@ -87,3 +87,32 @@ then enable Pulse and check its actual state using
 [TROUBLESHOOTING.md](TROUBLESHOOTING.md#all-gnome-extensions-get-turned-off).
 The new login is necessary because [GNOME retains imported extension code
 until the Shell process ends](https://gjs.guide/extensions/development/debugging.html#reloading-extensions).
+
+## Follow-up functional review
+
+The follow-up review reproduced a library menu extending to 2,342 pixels on
+the native test's 720-pixel display. Results and the load-more action now sit
+in a scrollable container, allowing Shell to constrain the menu to the screen.
+Keyboard focus scrolls a selected result into view. The native suite now uses
+36 distinct library rows and checks both menu geometry and last-row visibility;
+all ten cycles passed with the change.
+
+The additional daemon and installer regressions use private D-Bus services
+and temporary installation roots. They do not require an authenticated Spotify
+account or change the laptop's session, installed files, or saved data.
+
+| Trigger | Corrected behavior | Regression coverage |
+| --- | --- | --- |
+| A populated library is opened | The menu stays within the screen, and focused rows scroll into view | Native GNOME geometry and keyboard-focus checks |
+| Spotify exits and restarts under a different MPRIS name | Pulse reports disconnected, disables playback controls, and discovers the replacement | Rust daemon refresh through a private D-Bus service |
+| A stored Spotify session is restored after daemon construction | Health reports the live authentication state | Rust token restoration and clearing test |
+| A request reports that the Pulse service disappeared while other requests are pending | Old requests and signals are invalidated; the failed request still receives its error callback and reconnect works | Node service-loss and recovery test |
+| A playback signal arrives before an older snapshot reply | The newer playback state survives the delayed reply; later explicit requests still work | Node snapshot ordering and property-update tests |
+| Uninstall cannot disable Pulse or verify its inactive state | Installed files and runtime data are preserved | Python uninstall failure and successful removal tests |
+| A daemon or service file destination is already a directory | Installation fails before changing the extension or installed files | Python destination preflight tests for all three file targets |
+
+Validation of the combined fixes passed 31 Node tests, 20 installer/uninstaller
+tests, and 23 Rust tests, including the private-bus MPRIS integration test.
+The ten-cycle native GNOME suite, Rust formatting, Clippy, release build,
+ShellCheck, and strict schema checks also passed. The staged release extension
+files match the tested source.

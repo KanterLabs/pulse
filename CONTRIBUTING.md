@@ -73,6 +73,8 @@ GNOME APIs or GObject lifetime errors.
 Contract tests should use a private session bus and deterministic fixtures;
 they must not depend on a contributor's live desktop session, Spotify account,
 or network. Do not add tests that require real credentials to pass.
+The Rust MPRIS regressions require `dbus-daemon` on `PATH` and start their own
+temporary bus. They never connect to the desktop's session bus.
 
 ## Pull requests
 

@@ -220,4 +220,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-cargo-1.88-
       - name: Run workspace tests
-        run: cargo test --workspace
+        run: |
+          dbus-daemon --version
+          cargo test --workspace

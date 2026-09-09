@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Isolated contract tests for the per-user installer.
+"""Isolated contract tests for the per-user installer and uninstaller.
 
 These tests exercise the shell script with temporary XDG roots and fake
 session commands.  They never write to the repository's installation paths,
@@ -18,6 +18,7 @@ import unittest
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 INSTALLER = REPOSITORY / "scripts" / "install-user.sh"
+UNINSTALLER = REPOSITORY / "scripts" / "uninstall-user.sh"
 
 
 class InstallerFixture:
@@ -208,8 +209,21 @@ esac
         return environment
 
     def run(self, *arguments: str, **environment: str) -> subprocess.CompletedProcess[str]:
+        return self.run_script(INSTALLER, *arguments, **environment)
+
+    def run_uninstaller(
+        self, *arguments: str, **environment: str
+    ) -> subprocess.CompletedProcess[str]:
+        return self.run_script(UNINSTALLER, *arguments, **environment)
+
+    def run_script(
+        self,
+        script: Path,
+        *arguments: str,
+        **environment: str,
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [str(INSTALLER), *arguments],
+            [str(script), *arguments],
             cwd=REPOSITORY,
             env=self.environment(**environment),
             capture_output=True,
@@ -551,6 +565,118 @@ class InstallerTests(unittest.TestCase):
         self.assertFalse(self.fixture.systemd_dir.exists())
         self.assertFalse(self.fixture.dbus_dir.exists())
         self.assertFalse((self.fixture.data_home / "pulse-extension-quarantine").exists())
+        for path, contents in preserved.items():
+            self.assertEqual(path.read_bytes(), contents, msg=f"runtime data changed: {path}")
+
+    def test_file_destinations_reject_directories_before_install_mutation(self) -> None:
+        destinations = {
+            "daemon": lambda fixture: fixture.daemon_destination,
+            "systemd": lambda fixture: fixture.systemd_dir / "pulse-daemon.service",
+            "dbus": lambda fixture: fixture.dbus_dir / "io.kanterlabs.Pulse.service",
+        }
+
+        for name, destination_for in destinations.items():
+            with self.subTest(destination=name):
+                fixture = InstallerFixture()
+                try:
+                    fixture.install_old_extension()
+                    destination = destination_for(fixture)
+                    if name != "daemon":
+                        fixture.daemon_destination.write_bytes(b"old daemon\n")
+                    destination.mkdir(parents=True)
+
+                    result = fixture.run("--no-start")
+
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("refusing to replace non-file destination", result.stderr)
+                    self.assertTrue(destination.is_dir())
+                    self.assertEqual(
+                        (fixture.extension_dir / "extension.js").read_text(encoding="utf-8"),
+                        "// old extension fixture\n",
+                    )
+                    if name != "daemon":
+                        self.assertEqual(fixture.daemon_destination.read_bytes(), b"old daemon\n")
+                    self.assertEqual(fixture.gnome_log_lines(), [])
+                    self.assertEqual(list(destination.iterdir()), [])
+                finally:
+                    fixture.close()
+
+    def test_uninstall_disables_verifies_and_preserves_runtime_state(self) -> None:
+        self.fixture.install_old_extension()
+        preserved = self.fixture.create_populated_runtime_state()
+        self.fixture.daemon_destination.write_bytes(b"old daemon\n")
+        systemd_path = self.fixture.systemd_dir / "pulse-daemon.service"
+        dbus_path = self.fixture.dbus_dir / "io.kanterlabs.Pulse.service"
+        systemd_path.parent.mkdir(parents=True, exist_ok=True)
+        dbus_path.parent.mkdir(parents=True, exist_ok=True)
+        systemd_path.write_bytes(b"old unit\n")
+        dbus_path.write_bytes(b"old dbus service\n")
+
+        result = self.fixture.run_uninstaller()
+
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=f"uninstaller failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+        )
+        self.assertEqual(
+            self.fixture.gnome_log_lines(),
+            ["disable pulse@kanterlabs", "info pulse@kanterlabs"],
+        )
+        self.assertFalse(self.fixture.extension_dir.exists())
+        self.assertFalse(self.fixture.daemon_destination.exists())
+        self.assertFalse(systemd_path.exists())
+        self.assertFalse(dbus_path.exists())
+        for path, contents in preserved.items():
+            self.assertEqual(path.read_bytes(), contents, msg=f"runtime data changed: {path}")
+
+    def test_uninstall_refuses_removal_when_extension_disable_fails(self) -> None:
+        self.fixture.install_old_extension()
+        preserved = self.fixture.create_populated_runtime_state()
+        self.fixture.daemon_destination.write_bytes(b"old daemon\n")
+        systemd_path = self.fixture.systemd_dir / "pulse-daemon.service"
+        dbus_path = self.fixture.dbus_dir / "io.kanterlabs.Pulse.service"
+        systemd_path.parent.mkdir(parents=True, exist_ok=True)
+        dbus_path.parent.mkdir(parents=True, exist_ok=True)
+        systemd_path.write_bytes(b"old unit\n")
+        dbus_path.write_bytes(b"old dbus service\n")
+
+        result = self.fixture.run_uninstaller(PULSE_TEST_DISABLE_STATUS="1")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("could not disable GNOME extension", result.stderr)
+        self.assertEqual(
+            (self.fixture.extension_dir / "extension.js").read_text(encoding="utf-8"),
+            "// old extension fixture\n",
+        )
+        self.assertEqual(self.fixture.daemon_destination.read_bytes(), b"old daemon\n")
+        self.assertEqual(systemd_path.read_bytes(), b"old unit\n")
+        self.assertEqual(dbus_path.read_bytes(), b"old dbus service\n")
+        self.assertEqual(self.fixture.command_log_text(), "")
+        for path, contents in preserved.items():
+            self.assertEqual(path.read_bytes(), contents, msg=f"runtime data changed: {path}")
+
+    def test_uninstall_refuses_removal_when_inactive_state_cannot_be_verified(self) -> None:
+        self.fixture.install_old_extension()
+        preserved = self.fixture.create_populated_runtime_state()
+        self.fixture.daemon_destination.write_bytes(b"old daemon\n")
+
+        result = self.fixture.run_uninstaller(
+            PULSE_TEST_EXTENSION_STATE_AFTER_DISABLE="ERROR",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("could not confirm GNOME extension", result.stderr)
+        self.assertEqual(
+            (self.fixture.extension_dir / "extension.js").read_text(encoding="utf-8"),
+            "// old extension fixture\n",
+        )
+        self.assertEqual(self.fixture.daemon_destination.read_bytes(), b"old daemon\n")
+        self.assertEqual(
+            self.fixture.gnome_log_lines(),
+            ["disable pulse@kanterlabs", "info pulse@kanterlabs"],
+        )
+        self.assertEqual(self.fixture.command_log_text(), "")
         for path, contents in preserved.items():
             self.assertEqual(path.read_bytes(), contents, msg=f"runtime data changed: {path}")
 

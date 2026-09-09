@@ -88,12 +88,13 @@ impl MprisClient {
             }
         };
 
-        let status = proxy
-            .get_property::<String>("PlaybackStatus")
-            .await
-            .map_or(PlaybackStatus::Unknown, |value| {
-                PlaybackStatus::from_mpris(&value)
-            });
+        let status = match proxy.get_property::<String>("PlaybackStatus").await {
+            Ok(value) => PlaybackStatus::from_mpris(&value),
+            Err(error) => {
+                self.set_player_name(None);
+                return Ok(PlaybackSnapshot::disconnected(Some(error.to_string())));
+            }
+        };
         let metadata = proxy
             .get_property::<HashMap<String, OwnedValue>>("Metadata")
             .await

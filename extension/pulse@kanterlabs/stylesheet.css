@@ -384,6 +384,10 @@
     color: #242428;
 }
 
+.pulse-results-scroll {
+    max-height: 240px;
+}
+
 .pulse-search-results {
     spacing: 2px;
     padding-top: 8px;
