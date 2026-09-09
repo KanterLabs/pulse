@@ -72,6 +72,39 @@ Do not delete the database or configuration as a first troubleshooting step.
 The default uninstall is non-destructive; use the explicit `--purge` data
 removal option only after preserving a backup and confirming every target.
 
+### Panel asks to start the daemon while the service is running
+
+The panel shows this message when it cannot reach Pulse over the session bus.
+An `active (running)` service only confirms that the process is alive. If its
+journal repeatedly reports `playback signal failed` with `Broken pipe`, its
+D-Bus connection has closed and the old daemon is stuck using that connection.
+
+Restart the installed daemon once to reconnect:
+
+```bash
+systemctl --user restart pulse-daemon.service
+```
+
+Then check that its API responds:
+
+```bash
+gdbus call --session --timeout=5 --dest io.kanterlabs.Pulse --object-path /io/kanterlabs/Pulse --method io.kanterlabs.Pulse1.Health
+```
+
+A JSON health response confirms that the daemon is reachable; it can still
+report disconnected playback when Spotify is closed. If the call fails,
+collect recent service logs with this separate command:
+
+```bash
+journalctl --user -u pulse-daemon.service -n 40 --no-pager
+```
+
+The repaired daemon exits with a failure status when its service connection
+closes, including during a refresh or a long polling interval. The installed
+unit's `Restart=on-failure` policy starts a fresh process after two seconds.
+Repeated startup failures remain subject to systemd's restart limits. A
+daemon started directly in a terminal needs to be started again manually.
+
 ### Safe extension upgrades and recovery
 
 The installer leaves the GNOME extension disabled by default while Pulse is
@@ -187,10 +220,20 @@ desktop session exposes a session bus.
 ## OAuth and PKCE
 
 The redirect URI in the Spotify Dashboard must exactly match the one configured
-for Pulse. Use the literal loopback address `127.0.0.1`; do not replace it with
-`localhost` or add a trailing slash that is not configured. The client ID may
-be in user configuration, but the refresh token belongs in GNOME Keyring via
-Secret Service.
+for Pulse. For the recommended setup, register `http://127.0.0.1:8888/callback`
+and set `redirect_port = 8888` under `[spotify]` in `~/.config/pulse/config.toml`.
+Click **Add** next to the URI, then save the Dashboard settings. If the Dashboard
+rejects `http://127.0.0.1/callback` as insecure, use this explicit-port setup.
+Install a version of Pulse supporting `redirect_port` before connecting, and
+restart the daemon after changing its config. An older daemon ignores the new
+setting and still generates a random port.
+
+Use the literal loopback address `127.0.0.1`; do not replace it with `localhost`
+or add a trailing slash that is not configured. If the callback port is already
+occupied, choose an unused port in both places. Reopening an in-progress login
+reuses its authorization URL; logging out and starting again retires the old
+attempt before rebinding the callback port. The client ID may be in user
+configuration, but the refresh token belongs in GNOME Keyring via Secret Service.
 
 If login returns without an account, verify the keyring service and inspect
 the daemon log for a redacted error. Never paste a browser callback URL or an

@@ -244,14 +244,16 @@ and [Developer Policy](https://developer.spotify.com/policy) before enabling
 account features; those rules can change.
 
 1. Create one application in the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard).
-2. Add `http://127.0.0.1/callback` to the app's redirect allowlist. Pulse uses
-   Spotify's loopback exception and adds a dynamically assigned port at login;
-   register the loopback URI without a port and do not substitute `localhost`.
-3. Put only the client ID in `~/.config/pulse/config.toml`:
+2. Select **Web API** and add `http://127.0.0.1:8888/callback` to the app's
+   redirect allowlist. Click **Add** beside the URI before saving the app.
+   The Web Playback SDK is not needed. Use the literal `127.0.0.1` address.
+3. Put the public client ID and matching port in `~/.config/pulse/config.toml`.
+   Update an existing `[spotify]` section without removing other settings:
 
    ```toml
    [spotify]
    client_id = "your-public-client-id"
+   redirect_port = 8888
    ```
 
    Then restart with `systemctl --user restart pulse-daemon.service`. A client
@@ -260,6 +262,14 @@ account features; those rules can change.
 4. Start login from Pulse. It opens the system browser and uses Authorization
    Code with PKCE; the daemon keeps the refresh token in GNOME Keyring through
    Secret Service.
+
+The callback listens only on `127.0.0.1` during login. If port 8888 is in use,
+choose another unused port and update both `redirect_port` and the Dashboard
+URI to match. Pulse reports a port conflict instead of silently choosing a
+different redirect URI. Omitting `redirect_port`, or setting it to zero,
+retains dynamic ports for existing configurations. Spotify documents a
+no-port loopback exception, but its Dashboard has rejected that format;
+an explicit port avoids that setup failure.
 
 The initial read-only scopes are:
 
@@ -307,6 +317,10 @@ Common causes:
 - **The daemon is inactive:** inspect `systemctl --user status` and the user
   journal. Run the doctor again to catch missing user-session commands or a
   wrong install path.
+- **The panel asks to start an already-running daemon:** repeated `Broken pipe`
+  errors indicate a closed D-Bus connection. Restart `pulse-daemon.service`
+  once and install the recovery fix. See the
+  [connection recovery checks](docs/TROUBLESHOOTING.md#panel-asks-to-start-the-daemon-while-the-service-is-running).
 - **Spotify is not controllable:** start Spotify first, then verify that an
   MPRIS player appears with `busctl --user tree`; Flatpak and native Spotify
   builds can expose different player names.
