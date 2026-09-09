@@ -132,7 +132,12 @@ jobs:
               echo "::warning::glib-compile-schemas is unavailable; schema validation was skipped for $directory"
             fi
           done
-      - name: Exercise extension lifecycle and D-Bus failures
+      - name: Check playback prototype syntax
+        run: |
+          for file in experiments/web-playback/*.mjs; do
+            node --check "$file"
+          done
+      - name: Exercise extension, D-Bus, and playback prototype regressions
         run: node --test tests/*.test.mjs
       - name: Verify installer safety and data preservation
         run: python3 tests/install-user.test.py
