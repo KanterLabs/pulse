@@ -1,0 +1,4 @@
+**
+!tests/
+!tests/gnome-smoke/
+!tests/gnome-smoke/run.sh

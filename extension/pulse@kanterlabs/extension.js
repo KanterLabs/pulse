@@ -9,27 +9,48 @@ import St from 'gi://St';
 
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import * as BarLevel from 'resource:///org/gnome/shell/ui/barLevel.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
 import {PulseConnection, parseAuthState, parseViewPayload} from './dbus.js';
 
-const TOGGLE_SHORTCUT = 'toggle-popover';
+const TOGGLE_SHORTCUT = 'toggle-shortcut';
 const PROGRESS_TICK_SECONDS = 1;
 const AUTH_POLL_SECONDS = 2;
 const AUTH_POLL_LIMIT = 150;
 const SEARCH_DELAY_MS = 260;
 const MAX_SEARCH_RESULTS = 8;
-const MAX_VIEW_PAGE_ROWS = 12;
 const MAX_VIEW_ROWS = 36;
+
+function toggleStyleClass(actor, name, enabled) {
+    if (enabled)
+        actor.add_style_class_name(name);
+    else
+        actor.remove_style_class_name(name);
+}
 
 function displayText(value, fallback = '') {
     const text = typeof value === 'string' ? value.trim() : '';
     return text || fallback;
 }
 
+function finitePosition(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, number)) : 0;
+}
+
+function cleanup(callback) {
+    try {
+        callback();
+    } catch (error) {
+        // One failed teardown step must not leave the remaining sources alive.
+        console.error('Pulse cleanup failed', error);
+    }
+}
+
 function formatTime(microseconds) {
-    const seconds = Math.max(0, Math.floor(Number(microseconds || 0) / 1000000));
+    const seconds = Math.floor(finitePosition(microseconds) / 1000000);
     const minutes = Math.floor(seconds / 60);
     const remainder = seconds % 60;
     return `${minutes}:${String(remainder).padStart(2, '0')}`;
@@ -70,13 +91,10 @@ function safeAuthorizationUri(value) {
 
 const PulseIndicator = GObject.registerClass(
 class PulseIndicator extends PanelMenu.Button {
-    _init(connection, settings, extensionDir) {
+    _init() {
         super._init(0.0, 'Pulse', false);
-
-        this._connection = connection;
-        this._settings = settings;
-        this._extensionDir = extensionDir;
-        this._pulseGIcon = this._loadBundledIcon();
+        this._destroyed = false;
+        this._menuSignalId = 0;
         this._signalIds = [];
         this._settingsSignalIds = [];
         this._themeSettings = null;
@@ -86,8 +104,6 @@ class PulseIndicator extends PanelMenu.Button {
         this._authPollAttempts = 0;
         this._searchSource = 0;
         this._currentPositionUs = 0;
-        this._snapshot = connection.snapshot;
-        this._authState = connection.authState;
         this._artworkUri = '';
         this._view = 'home';
         this._viewData = new Map();
@@ -95,35 +111,46 @@ class PulseIndicator extends PanelMenu.Button {
         this._searchPayload = {items: []};
         this._pendingAuthorizationUrl = '';
         this._loginInProgress = false;
+        this._launchCancellable = null;
+        this._positionUpdatedAt = GLib.get_monotonic_time();
+    }
 
+    // Keep the actor reachable before any of the fallible menu setup runs.
+    // disable() can then destroy the partial tree if initialization throws.
+    initialize(connection, settings, extensionDir) {
+        this._connection = connection;
+        this._settings = settings;
+        this._extensionDir = extensionDir;
+        this._pulseGIcon = this._loadBundledIcon();
+        this._snapshot = connection.snapshot;
+        this._authState = connection.authState;
         this._buildPanelButton();
         this._buildPopover();
         this._connectSignals();
         this._syncTheme();
         this._syncSettings();
         this._renderAuthState();
-        this._progressSource = GLib.timeout_add_seconds(
-            GLib.PRIORITY_DEFAULT,
-            PROGRESS_TICK_SECONDS,
-            () => this._tickProgress());
     }
 
     _buildPanelButton() {
         this._panelBox = new St.BoxLayout({style_class: 'pulse-panel-box'});
+        this.add_child(this._panelBox);
         this._panelIcon = new St.Icon({style_class: 'system-status-icon pulse-panel-icon'});
+        this._panelBox.add_child(this._panelIcon);
         if (this._pulseGIcon)
             this._panelIcon.gicon = this._pulseGIcon;
         this._panelDot = new St.Widget({style_class: 'pulse-panel-dot'});
-        this._panelBox.add_child(this._panelIcon);
         this._panelBox.add_child(this._panelDot);
-        this.add_child(this._panelBox);
         this.accessible_name = 'Pulse music controls';
     }
 
     _buildPopover() {
         this.menu.box.add_style_class_name('pulse-popover');
         this.menu.box.set_width(372);
-        this.menu.connect('open-state-changed', (_menu, open) => {
+        this._menuSignalId = this.menu.connect('open-state-changed', (_menu, open) => {
+            if (this._destroyed)
+                return;
+            this._syncProgressTimer();
             if (!open)
                 return;
             // Opening is an explicit user action, so refresh the lightweight
@@ -147,35 +174,38 @@ class PulseIndicator extends PanelMenu.Button {
             can_focus: false,
             style_class: 'pulse-now-playing-item',
         });
+        this.menu.addMenuItem(this._nowPlayingItem);
 
         const row = new St.BoxLayout({style_class: 'pulse-now-playing-row'});
+        this._nowPlayingItem.add_child(row);
         const artworkFrame = new St.Bin({style_class: 'pulse-artwork-frame'});
+        row.add_child(artworkFrame);
         this._artwork = new St.Icon({
             icon_size: 72,
             style_class: 'pulse-artwork',
         });
+        artworkFrame.set_child(this._artwork);
         if (this._pulseGIcon)
             this._artwork.gicon = this._pulseGIcon;
-        artworkFrame.set_child(this._artwork);
-        row.add_child(artworkFrame);
 
         const details = new St.BoxLayout({
             vertical: true,
             x_expand: true,
             style_class: 'pulse-track-details',
         });
+        row.add_child(details);
         this._statusLabel = new St.Label({style_class: 'pulse-status-label'});
+        details.add_child(this._statusLabel);
         this._titleLabel = new St.Label({style_class: 'pulse-title-label'});
+        details.add_child(this._titleLabel);
         this._artistLabel = new St.Label({style_class: 'pulse-artist-label'});
+        details.add_child(this._artistLabel);
         this._albumLabel = new St.Label({style_class: 'pulse-album-label'});
+        details.add_child(this._albumLabel);
         for (const label of [this._statusLabel, this._titleLabel, this._artistLabel, this._albumLabel]) {
             label.clutter_text.ellipsize = Pango.EllipsizeMode.END;
             label.clutter_text.single_line_mode = true;
-            details.add_child(label);
         }
-        row.add_child(details);
-        this._nowPlayingItem.add_child(row);
-        this.menu.addMenuItem(this._nowPlayingItem);
     }
 
     _buildProgress() {
@@ -184,22 +214,22 @@ class PulseIndicator extends PanelMenu.Button {
             can_focus: false,
             style_class: 'pulse-progress-item',
         });
+        this.menu.addMenuItem(this._progressItem);
         const column = new St.BoxLayout({vertical: true, x_expand: true});
-        this._progress = new St.ProgressBar({
-            style_class: 'pulse-progress-bar',
+        this._progressItem.add_child(column);
+        this._progress = new BarLevel.BarLevel({
+            style_class: 'barlevel pulse-progress-bar',
             x_expand: true,
-            progress: 0,
+            value: 0,
         });
         column.add_child(this._progress);
         const times = new St.BoxLayout({x_expand: true, style_class: 'pulse-time-row'});
-        this._positionLabel = new St.Label({text: '0:00', style_class: 'pulse-time-label'});
-        this._durationLabel = new St.Label({text: '0:00', style_class: 'pulse-time-label'});
-        times.add_child(this._positionLabel);
-        times.add_child(new St.Widget({x_expand: true}));
-        times.add_child(this._durationLabel);
         column.add_child(times);
-        this._progressItem.add_child(column);
-        this.menu.addMenuItem(this._progressItem);
+        this._positionLabel = new St.Label({text: '0:00', style_class: 'pulse-time-label'});
+        times.add_child(this._positionLabel);
+        this._durationLabel = new St.Label({text: '0:00', style_class: 'pulse-time-label'});
+        times.add_child(this._durationLabel);
+        times.add_child(new St.Widget({x_expand: true}));
     }
 
     _buildControls() {
@@ -208,30 +238,32 @@ class PulseIndicator extends PanelMenu.Button {
             can_focus: false,
             style_class: 'pulse-controls-item',
         });
+        this.menu.addMenuItem(this._controlsItem);
         const column = new St.BoxLayout({vertical: true, x_expand: true});
+        this._controlsItem.add_child(column);
         const controls = new St.BoxLayout({
             style_class: 'pulse-controls',
             x_align: Clutter.ActorAlign.CENTER,
             x_expand: true,
         });
+        column.add_child(controls);
 
         this._previousButton = this._makeIconButton(
             'media-skip-backward-symbolic',
             'Previous track',
             () => this._connection.previous());
+        controls.add_child(this._previousButton);
         this._playButton = this._makeIconButton(
             'media-playback-start-symbolic',
             'Play',
             () => this._connection.playPause(),
             'pulse-play-button');
+        controls.add_child(this._playButton);
         this._nextButton = this._makeIconButton(
             'media-skip-forward-symbolic',
             'Next track',
             () => this._connection.next());
-        controls.add_child(this._previousButton);
-        controls.add_child(this._playButton);
         controls.add_child(this._nextButton);
-        column.add_child(controls);
 
         this._openButton = new St.Button({
             style_class: 'pulse-open-button',
@@ -241,14 +273,12 @@ class PulseIndicator extends PanelMenu.Button {
             track_hover: true,
             x_expand: true,
         });
+        column.add_child(this._openButton);
         this._openButton.accessible_name = 'Open current track in Spotify';
         this._openButton.connect('clicked', () => {
             const uri = this._snapshot.spotify_url || 'spotify:';
             this._connection.openUri(uri);
         });
-        column.add_child(this._openButton);
-        this._controlsItem.add_child(column);
-        this.menu.addMenuItem(this._controlsItem);
     }
 
     _buildAuth() {
@@ -257,13 +287,16 @@ class PulseIndicator extends PanelMenu.Button {
             can_focus: false,
             style_class: 'pulse-auth-item',
         });
+        this.menu.addMenuItem(this._authItem);
         const column = new St.BoxLayout({vertical: true, x_expand: true});
+        this._authItem.add_child(column);
         this._authStatusLabel = new St.Label({style_class: 'pulse-auth-status'});
+        column.add_child(this._authStatusLabel);
         this._authStatusLabel.clutter_text.line_wrap = true;
         this._authStatusLabel.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
-        column.add_child(this._authStatusLabel);
 
         const actions = new St.BoxLayout({style_class: 'pulse-auth-actions', x_expand: true});
+        column.add_child(actions);
         this._loginButton = new St.Button({
             style_class: 'pulse-auth-button',
             label: 'Connect Spotify',
@@ -272,9 +305,9 @@ class PulseIndicator extends PanelMenu.Button {
             track_hover: true,
             x_expand: true,
         });
+        actions.add_child(this._loginButton);
         this._loginButton.accessible_name = 'Connect Spotify';
         this._loginButton.connect('clicked', () => this._beginLogin());
-        actions.add_child(this._loginButton);
 
         this._authorizationButton = new St.Button({
             style_class: 'pulse-auth-button',
@@ -284,10 +317,10 @@ class PulseIndicator extends PanelMenu.Button {
             track_hover: true,
             x_expand: true,
         });
+        actions.add_child(this._authorizationButton);
         this._authorizationButton.accessible_name = 'Open Spotify sign-in in a browser';
         this._authorizationButton.visible = false;
         this._authorizationButton.connect('clicked', () => this._openAuthorizationUrl());
-        actions.add_child(this._authorizationButton);
 
         this._logoutButton = new St.Button({
             style_class: 'pulse-auth-button',
@@ -297,13 +330,10 @@ class PulseIndicator extends PanelMenu.Button {
             track_hover: true,
             x_expand: true,
         });
+        actions.add_child(this._logoutButton);
         this._logoutButton.accessible_name = 'Log out of Spotify';
         this._logoutButton.visible = false;
         this._logoutButton.connect('clicked', () => this._connection.logout());
-        actions.add_child(this._logoutButton);
-        column.add_child(actions);
-        this._authItem.add_child(column);
-        this.menu.addMenuItem(this._authItem);
     }
 
     _buildNavigation() {
@@ -313,17 +343,17 @@ class PulseIndicator extends PanelMenu.Button {
             can_focus: false,
             style_class: 'pulse-navigation-item',
         });
-        const nav = new St.BoxLayout({style_class: 'pulse-navigation', x_expand: true});
-        this._homeButton = this._makeNavButton('Home', 'home', 'go-home-symbolic');
-        this._searchButton = this._makeNavButton('Search', 'search', 'system-search-symbolic');
-        this._libraryButton = this._makeNavButton('Library', 'library', 'folder-music-symbolic');
-        this._queueButton = this._makeNavButton('Queue', 'queue', 'view-list-symbolic');
-        nav.add_child(this._homeButton);
-        nav.add_child(this._searchButton);
-        nav.add_child(this._libraryButton);
-        nav.add_child(this._queueButton);
-        this._navigationItem.add_child(nav);
         this.menu.addMenuItem(this._navigationItem);
+        const nav = new St.BoxLayout({style_class: 'pulse-navigation', x_expand: true});
+        this._navigationItem.add_child(nav);
+        this._homeButton = this._makeNavButton('Home', 'home', 'go-home-symbolic');
+        nav.add_child(this._homeButton);
+        this._searchButton = this._makeNavButton('Search', 'search', 'system-search-symbolic');
+        nav.add_child(this._searchButton);
+        this._libraryButton = this._makeNavButton('Library', 'library', 'folder-music-symbolic');
+        nav.add_child(this._libraryButton);
+        this._queueButton = this._makeNavButton('Queue', 'queue', 'view-list-symbolic');
+        nav.add_child(this._queueButton);
     }
 
     _buildPage() {
@@ -332,13 +362,15 @@ class PulseIndicator extends PanelMenu.Button {
             can_focus: false,
             style_class: 'pulse-page-item',
         });
+        this.menu.addMenuItem(this._pageItem);
         this._pageBox = new St.BoxLayout({vertical: true, x_expand: true});
+        this._pageItem.add_child(this._pageBox);
         this._pageTitle = new St.Label({style_class: 'pulse-page-title'});
+        this._pageBox.add_child(this._pageTitle);
         this._pageBody = new St.Label({style_class: 'pulse-page-body'});
+        this._pageBox.add_child(this._pageBody);
         this._pageBody.clutter_text.line_wrap = true;
         this._pageBody.clutter_text.line_wrap_mode = Pango.WrapMode.WORD_CHAR;
-        this._pageBox.add_child(this._pageTitle);
-        this._pageBox.add_child(this._pageBody);
 
         this._searchEntry = new St.Entry({
             style_class: 'pulse-search-entry',
@@ -347,6 +379,7 @@ class PulseIndicator extends PanelMenu.Button {
             reactive: true,
             x_expand: true,
         });
+        this._pageBox.add_child(this._searchEntry);
         this._searchEntry.accessible_name = 'Search your music';
         this._searchEntry.get_clutter_text().connect('text-changed', () => this._scheduleSearch());
         this._resultsBox = new St.BoxLayout({
@@ -354,6 +387,7 @@ class PulseIndicator extends PanelMenu.Button {
             style_class: 'pulse-search-results',
             x_expand: true,
         });
+        this._pageBox.add_child(this._resultsBox);
         this._loadMoreButton = new St.Button({
             style_class: 'pulse-load-more-button',
             label: 'Load more',
@@ -362,17 +396,13 @@ class PulseIndicator extends PanelMenu.Button {
             track_hover: true,
             x_expand: true,
         });
+        this._pageBox.add_child(this._loadMoreButton);
         this._loadMoreButton.accessible_name = 'Load more items';
         this._loadMoreButton.connect('clicked', () => {
             const data = this._viewData.get(this._view);
             if (data?.next_cursor)
                 this._loadView(this._view, data.next_cursor, true);
         });
-        this._pageBox.add_child(this._searchEntry);
-        this._pageBox.add_child(this._resultsBox);
-        this._pageBox.add_child(this._loadMoreButton);
-        this._pageItem.add_child(this._pageBox);
-        this.menu.addMenuItem(this._pageItem);
 
         this._setView(this._settings.get_string('default-view'));
     }
@@ -384,12 +414,17 @@ class PulseIndicator extends PanelMenu.Button {
             reactive: true,
             track_hover: true,
         });
-        const icon = new St.Icon({icon_name: iconName, style_class: 'pulse-control-icon'});
-        button.set_child(icon);
-        button.accessible_name = accessibleName;
-        button.connect('clicked', callback);
-        button._pulseIcon = icon;
-        return button;
+        try {
+            const icon = new St.Icon({icon_name: iconName, style_class: 'pulse-control-icon'});
+            button.set_child(icon);
+            button.accessible_name = accessibleName;
+            button.connect('clicked', callback);
+            button._pulseIcon = icon;
+            return button;
+        } catch (error) {
+            button.destroy();
+            throw error;
+        }
     }
 
     _loadBundledIcon() {
@@ -416,13 +451,18 @@ class PulseIndicator extends PanelMenu.Button {
             track_hover: true,
             x_expand: true,
         });
-        const box = new St.BoxLayout({vertical: true, x_align: Clutter.ActorAlign.CENTER});
-        box.add_child(new St.Icon({icon_name: iconName, style_class: 'pulse-nav-icon'}));
-        box.add_child(new St.Label({text: label, style_class: 'pulse-nav-label'}));
-        button.set_child(box);
-        button.accessible_name = label;
-        button.connect('clicked', () => this._setView(view));
-        return button;
+        try {
+            const box = new St.BoxLayout({vertical: true, x_align: Clutter.ActorAlign.CENTER});
+            button.set_child(box);
+            box.add_child(new St.Icon({icon_name: iconName, style_class: 'pulse-nav-icon'}));
+            box.add_child(new St.Label({text: label, style_class: 'pulse-nav-label'}));
+            button.accessible_name = label;
+            button.connect('clicked', () => this._setView(view));
+            return button;
+        } catch (error) {
+            button.destroy();
+            throw error;
+        }
     }
 
     _connectSignals() {
@@ -431,6 +471,15 @@ class PulseIndicator extends PanelMenu.Button {
             this._renderSnapshot();
         }));
         this._signalIds.push(this._connection.connect('connection-changed', (_connection, connected) => {
+            if (!connected) {
+                this._loginInProgress = false;
+                this._pendingAuthorizationUrl = '';
+                this._stopAuthPolling();
+                if (this._launchCancellable)
+                    this._launchCancellable.cancel();
+                this._launchCancellable = null;
+                this._viewRequests.clear();
+            }
             this._renderSnapshot();
             this._renderAuthState();
             if (connected && this.menu.isOpen) {
@@ -473,7 +522,7 @@ class PulseIndicator extends PanelMenu.Button {
     _syncSettings() {
         const showProgress = this._settings.get_boolean('show-progress');
         this._progressItem.visible = showProgress;
-        this._controlsItem.toggle_style_class_name('pulse-compact-controls', this._settings.get_boolean('compact-mode'));
+        toggleStyleClass(this._controlsItem, 'pulse-compact-controls', this._settings.get_boolean('compact-mode'));
         this._renderSnapshot();
     }
 
@@ -505,12 +554,13 @@ class PulseIndicator extends PanelMenu.Button {
         this._titleLabel.text = title;
         this._artistLabel.text = artist;
         this._albumLabel.text = hasTrack ? displayText(snapshot.album, 'Spotify') : '';
-        this._statusLabel.toggle_style_class_name('pulse-status-offline', offline);
+        toggleStyleClass(this._statusLabel, 'pulse-status-offline', offline);
 
         this._currentPositionUs = Math.min(
-            Math.max(0, Number(snapshot.position_us || 0)),
-            Math.max(0, Number(snapshot.length_us || 0)));
+            finitePosition(snapshot.position_us), finitePosition(snapshot.length_us));
+        this._positionUpdatedAt = GLib.get_monotonic_time();
         this._renderProgress();
+        this._syncProgressTimer();
         this._updateArtwork(snapshot.art_url);
 
         const canControl = !offline && Boolean(snapshot.can_control);
@@ -522,15 +572,10 @@ class PulseIndicator extends PanelMenu.Button {
             : 'media-playback-start-symbolic';
         this._playButton.accessible_name = snapshot.playing ? 'Pause' : 'Play';
 
-        this._panelDot.toggle_style_class_name('pulse-dot-active', !offline);
-        this._panelDot.toggle_style_class_name('pulse-dot-playing', Boolean(snapshot.playing));
-        this._panelBox.toggle_style_class_name('pulse-panel-offline', offline);
+        toggleStyleClass(this._panelDot, 'pulse-dot-active', !offline);
+        toggleStyleClass(this._panelDot, 'pulse-dot-playing', Boolean(snapshot.playing));
+        toggleStyleClass(this._panelBox, 'pulse-panel-offline', offline);
         this.accessible_name = offline ? 'Pulse, Spotify unavailable' : `Pulse, ${title}`;
-        try {
-            this.set_tooltip_text(offline ? 'Pulse: Spotify is unavailable' : `Pulse: ${title}`);
-        } catch (_error) {
-            // Tooltips are optional in minimal Shell test environments.
-        }
     }
 
     _setButtonEnabled(button, enabled) {
@@ -543,21 +588,37 @@ class PulseIndicator extends PanelMenu.Button {
     }
 
     _renderProgress() {
-        const length = Math.max(0, Number(this._snapshot.length_us || 0));
-        const position = Math.min(Math.max(0, Number(this._currentPositionUs || 0)), length || Infinity);
-        this._progress.progress = length > 0 ? position / length : 0;
+        if (this._destroyed)
+            return;
+        const length = finitePosition(this._snapshot.length_us);
+        const elapsed = this._snapshot.playing && this._connection.connected
+            ? Math.max(0, GLib.get_monotonic_time() - this._positionUpdatedAt) : 0;
+        const position = Math.min(finitePosition(this._currentPositionUs + elapsed), length);
+        this._progress.value = length > 0 ? position / length : 0;
         this._positionLabel.text = formatTime(position);
         this._durationLabel.text = formatTime(length);
     }
 
-    _tickProgress() {
-        if (this._snapshot.playing && this._snapshot.length_us > 0) {
-            this._currentPositionUs = Math.min(
-                Number(this._snapshot.length_us),
-                Number(this._currentPositionUs) + PROGRESS_TICK_SECONDS * 1000000);
-            this._renderProgress();
+    _syncProgressTimer() {
+        const active = !this._destroyed && this.menu.isOpen &&
+            this._progressItem.visible && this._connection.connected &&
+            this._snapshot.playing && finitePosition(this._snapshot.length_us) > 0;
+        if (!active) {
+            this._removeSource('_progressSource');
+            return;
         }
-        return GLib.SOURCE_CONTINUE;
+        this._renderProgress();
+        if (!this._progressSource) {
+            this._progressSource = GLib.timeout_add_seconds(
+                GLib.PRIORITY_DEFAULT, PROGRESS_TICK_SECONDS, () => {
+                    if (this._destroyed) {
+                        this._progressSource = 0;
+                        return GLib.SOURCE_REMOVE;
+                    }
+                    this._renderProgress();
+                    return GLib.SOURCE_CONTINUE;
+                });
+        }
     }
 
     _updateArtwork(uri) {
@@ -708,42 +769,49 @@ class PulseIndicator extends PanelMenu.Button {
             track_hover: true,
             x_expand: true,
         });
-        const row = new St.BoxLayout({style_class: 'pulse-result-row', x_expand: true});
-        const artwork = new St.Icon({
-            icon_size: 32,
-            style_class: 'pulse-result-artwork',
-        });
-        const artUrl = displayText(item?.art_url);
-        if (localArtworkUri(artUrl)) {
-            try {
-                const file = artUrl.startsWith('/') ? Gio.File.new_for_path(artUrl) : Gio.File.new_for_uri(artUrl);
-                artwork.gicon = Gio.FileIcon.new(file);
-            } catch (_error) {
+        try {
+            const row = new St.BoxLayout({style_class: 'pulse-result-row', x_expand: true});
+            button.set_child(row);
+            const artwork = new St.Icon({
+                icon_size: 32,
+                style_class: 'pulse-result-artwork',
+            });
+            const artUrl = displayText(item?.art_url);
+            if (localArtworkUri(artUrl)) {
+                try {
+                    const file = artUrl.startsWith('/') ? Gio.File.new_for_path(artUrl) : Gio.File.new_for_uri(artUrl);
+                    artwork.gicon = Gio.FileIcon.new(file);
+                } catch (_error) {
+                    artwork.gicon = this._pulseGIcon;
+                }
+            } else {
                 artwork.gicon = this._pulseGIcon;
             }
-        } else {
-            artwork.gicon = this._pulseGIcon;
+            row.add_child(artwork);
+            const details = new St.BoxLayout({vertical: true, x_expand: true, style_class: 'pulse-result-details'});
+            row.add_child(details);
+            const titleLabel = new St.Label({text: title, style_class: 'pulse-result-title'});
+            details.add_child(titleLabel);
+            const subtitleLabel = new St.Label({text: subtitle, style_class: 'pulse-result-subtitle'});
+            titleLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+            subtitleLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+            details.add_child(subtitleLabel);
+            button.accessible_name = `${title}, ${subtitle}`;
+            button.connect('clicked', () => {
+                const uri = itemUri(item);
+                if (uri)
+                    this._connection.openUri(uri);
+            });
+            return button;
+        } catch (error) {
+            button.destroy();
+            throw error;
         }
-        row.add_child(artwork);
-        const details = new St.BoxLayout({vertical: true, x_expand: true, style_class: 'pulse-result-details'});
-        const titleLabel = new St.Label({text: title, style_class: 'pulse-result-title'});
-        const subtitleLabel = new St.Label({text: subtitle, style_class: 'pulse-result-subtitle'});
-        titleLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
-        subtitleLabel.clutter_text.ellipsize = Pango.EllipsizeMode.END;
-        details.add_child(titleLabel);
-        details.add_child(subtitleLabel);
-        row.add_child(details);
-        button.set_child(row);
-        button.accessible_name = `${title}, ${subtitle}`;
-        button.connect('clicked', () => {
-            const uri = itemUri(item);
-            if (uri)
-                this._connection.openUri(uri);
-        });
-        return button;
     }
 
     _scheduleSearch() {
+        if (this._destroyed)
+            return;
         if (this._searchSource) {
             GLib.Source.remove(this._searchSource);
             this._searchSource = 0;
@@ -759,7 +827,8 @@ class PulseIndicator extends PanelMenu.Button {
 
         this._searchSource = GLib.timeout_add(GLib.PRIORITY_DEFAULT, SEARCH_DELAY_MS, () => {
             this._searchSource = 0;
-            this._connection.search(query);
+            if (!this._destroyed)
+                this._connection.search(query);
             return GLib.SOURCE_REMOVE;
         });
     }
@@ -798,24 +867,30 @@ class PulseIndicator extends PanelMenu.Button {
     }
 
     _beginLogin() {
-        if (this._loginInProgress)
+        if (this._destroyed || this._loginInProgress)
             return;
         this._loginInProgress = true;
         this._pendingAuthorizationUrl = '';
         this._renderAuthState();
         this._connection.beginLogin(authorizationUrl => {
+            if (this._destroyed)
+                return;
             // Do not launch here: this callback is asynchronous and no longer
             // itself represents a user gesture. Show a second, explicit action.
             this._pendingAuthorizationUrl = authorizationUrl;
             this._loginInProgress = false;
             this._renderAuthState();
         }, () => {
+            if (this._destroyed)
+                return;
             this._loginInProgress = false;
             this._renderAuthState();
         });
     }
 
     _openAuthorizationUrl() {
+        if (this._destroyed || this._launchCancellable)
+            return;
         const uri = safeAuthorizationUri(this._pendingAuthorizationUrl);
         if (!uri) {
             this._authStatusLabel.text = 'Pulse returned an invalid sign-in URL.';
@@ -823,21 +898,38 @@ class PulseIndicator extends PanelMenu.Button {
             return;
         }
 
+        const cancellable = new Gio.Cancellable();
+        this._launchCancellable = cancellable;
         try {
             const shellGlobal = globalThis.global;
             const context = shellGlobal?.create_app_launch_context?.() || null;
-            if (!Gio.AppInfo.launch_default_for_uri(uri, context))
-                throw new Error('No application accepted the authorization URL.');
-            this._pendingAuthorizationUrl = '';
-            this._startAuthPolling();
-            this._renderAuthState();
+            Gio.AppInfo.launch_default_for_uri_async(uri, context, cancellable, (_source, result) => {
+                let launched = false;
+                try {
+                    launched = Gio.AppInfo.launch_default_for_uri_finish(result);
+                } catch (_error) {
+                    // Cancellation during disable is expected. Consume the
+                    // GIO result, but do not access actors after teardown.
+                }
+                if (this._destroyed || this._launchCancellable !== cancellable)
+                    return;
+                this._launchCancellable = null;
+                if (launched) {
+                    this._pendingAuthorizationUrl = '';
+                    this._startAuthPolling();
+                    this._renderAuthState();
+                } else {
+                    this._authStatusLabel.text = 'Could not open a browser for Spotify sign-in.';
+                }
+            });
         } catch (_error) {
+            this._launchCancellable = null;
             this._authStatusLabel.text = 'Could not open a browser for Spotify sign-in.';
         }
     }
 
     _renderAuthState() {
-        if (!this._authStatusLabel)
+        if (this._destroyed || !this._authStatusLabel)
             return;
         const auth = this._authState || this._connection.authState || {};
         const offline = !this._connection.connected;
@@ -873,6 +965,8 @@ class PulseIndicator extends PanelMenu.Button {
     }
 
     _startAuthPolling() {
+        if (this._destroyed)
+            return;
         this._stopAuthPolling();
         this._authPollAttempts = 0;
         this._connection.getAuthState();
@@ -881,7 +975,7 @@ class PulseIndicator extends PanelMenu.Button {
             AUTH_POLL_SECONDS,
             () => {
                 this._authPollAttempts++;
-                if (this._authState?.authenticated || this._authPollAttempts >= AUTH_POLL_LIMIT) {
+                if (this._destroyed || this._authState?.authenticated || this._authPollAttempts >= AUTH_POLL_LIMIT) {
                     this._authPollSource = 0;
                     return GLib.SOURCE_REMOVE;
                 }
@@ -891,85 +985,116 @@ class PulseIndicator extends PanelMenu.Button {
     }
 
     _stopAuthPolling() {
-        if (this._authPollSource)
-            GLib.Source.remove(this._authPollSource);
-        this._authPollSource = 0;
+        this._removeSource('_authPollSource');
         this._authPollAttempts = 0;
     }
 
-    destroy() {
+    _removeSource(property) {
+        const id = this[property];
+        this[property] = 0;
+        if (id)
+            cleanup(() => GLib.Source.remove(id));
+    }
+
+    _releaseResources() {
+        if (this._destroyed)
+            return;
+        this._destroyed = true;
         this._stopAuthPolling();
-        if (this._progressSource) {
-            GLib.Source.remove(this._progressSource);
-            this._progressSource = 0;
-        }
-        if (this._searchSource) {
-            GLib.Source.remove(this._searchSource);
-            this._searchSource = 0;
-        }
+        this._removeSource('_progressSource');
+        this._removeSource('_searchSource');
+        if (this._launchCancellable)
+            cleanup(() => this._launchCancellable.cancel());
+        this._launchCancellable = null;
+        if (this._menuSignalId)
+            cleanup(() => this.menu.disconnect(this._menuSignalId));
+        this._menuSignalId = 0;
         for (const id of this._signalIds)
-            this._connection.disconnect(id);
+            cleanup(() => this._connection.disconnect(id));
         this._signalIds = [];
         for (const id of this._settingsSignalIds)
-            this._settings.disconnect(id);
+            cleanup(() => this._settings.disconnect(id));
         this._settingsSignalIds = [];
         if (this._themeSettings && this._themeSignalId)
-            this._themeSettings.disconnect(this._themeSignalId);
+            cleanup(() => this._themeSettings.disconnect(this._themeSignalId));
         this._themeSignalId = 0;
         this._themeSettings = null;
+        this._viewData.clear();
+        this._viewRequests.clear();
+        this._searchPayload = {items: []};
+        this._pendingAuthorizationUrl = '';
+        this._connection = null;
+        this._settings = null;
+    }
+
+    _onDestroy() {
+        // Shell can destroy the panel from native code during logout without
+        // calling this JavaScript destroy() method. Cancel callbacks before
+        // PanelMenu destroys the menu, including its open-state handlers.
+        this._releaseResources();
+        super._onDestroy();
+    }
+
+    destroy() {
+        if (this._destroyed)
+            return;
+        this._releaseResources();
         super.destroy();
     }
 });
 
 export default class PulseExtension extends Extension {
     enable() {
-        this._settings = this.getSettings();
-        this._stylesheet = this.dir.get_child('stylesheet.css');
+        // Retain each resource until startup succeeds. Shell does not call
+        // disable() after every failed enable().
+        this._settingsSignalIds = [];
         try {
-            Main.get_theme().load_stylesheet(this._stylesheet);
-        } catch (_error) {
-            // Keep the extension functional if a test shell has no theme
-            // manager; the widgets still carry accessible names and spacing.
-        }
-        this._connection = new PulseConnection();
-        this._indicator = new PulseIndicator(this._connection, this._settings, this.dir);
-        Main.panel.addToStatusArea(this.uuid, this._indicator, 1, 'right');
+            this._settings = this.getSettings();
+            this._connection = new PulseConnection();
+            this._indicator = new PulseIndicator();
+            this._indicatorDestroyId = this._indicator.connect('destroy', () => {
+                // Native panel teardown must also retire the daemon client,
+                // settings callbacks and shortcut owned by the extension.
+                this._indicator = null;
+                this._indicatorDestroyId = 0;
+                this.disable();
+            });
+            this._indicator.initialize(this._connection, this._settings, this.dir);
+            Main.panel.addToStatusArea(this.uuid, this._indicator, 1, 'right');
 
-        this._settingsSignalIds = [
-            this._settings.connect('changed::show-indicator', () => this._syncIndicatorVisibility()),
-            this._settings.connect('changed::shortcut-enabled', () => this._syncShortcut()),
-            this._settings.connect('changed::toggle-shortcut', () => this._syncShortcut()),
-        ];
-        this._syncIndicatorVisibility();
-        this._syncShortcut();
-        this._connection.start();
+            for (const [signal, callback] of [
+                ['changed::show-indicator', () => this._syncIndicatorVisibility()],
+                ['changed::shortcut-enabled', () => this._syncShortcut()],
+                ['changed::toggle-shortcut', () => this._syncShortcut()],
+            ])
+                this._settingsSignalIds.push(this._settings.connect(signal, callback));
+            this._syncIndicatorVisibility();
+            this._syncShortcut();
+            this._connection.start();
+        } catch (error) {
+            this.disable();
+            throw error;
+        }
     }
 
     disable() {
         this._removeShortcut();
-        if (this._settings) {
-            for (const id of this._settingsSignalIds)
-                this._settings.disconnect(id);
-        }
+        for (const id of this._settingsSignalIds ?? [])
+            cleanup(() => this._settings.disconnect(id));
         this._settingsSignalIds = [];
-
-        if (this._indicator) {
-            this._indicator.destroy();
-            this._indicator = null;
-        }
-        if (this._connection) {
-            this._connection.destroy();
-            this._connection = null;
-        }
-        if (this._stylesheet) {
-            try {
-                Main.get_theme().unload_stylesheet(this._stylesheet);
-            } catch (_error) {
-                // The theme may already have been torn down during Shell exit.
-            }
-            this._stylesheet = null;
-        }
+        const indicator = this._indicator;
+        this._indicator = null;
+        if (indicator && this._indicatorDestroyId)
+            cleanup(() => indicator.disconnect(this._indicatorDestroyId));
+        this._indicatorDestroyId = 0;
+        if (indicator)
+            cleanup(() => indicator.destroy());
+        const connection = this._connection;
+        this._connection = null;
+        if (connection)
+            cleanup(() => connection.destroy());
         this._settings = null;
+        // GNOME's extension manager owns stylesheet.css loading/unloading.
     }
 
     _syncIndicatorVisibility() {
@@ -981,6 +1106,15 @@ export default class PulseExtension extends Extension {
         this._removeShortcut();
         if (!this._settings || !this._settings.get_boolean('shortcut-enabled'))
             return;
+
+        // Mutter treats the binding name as a settings key. A missing key
+        // aborts the native Shell process, bypassing JavaScript try/catch.
+        const schema = this._settings.settings_schema;
+        if (!schema.has_key(TOGGLE_SHORTCUT) ||
+            schema.get_key(TOGGLE_SHORTCUT).get_value_type().dup_string() !== 'as') {
+            console.error('Pulse shortcut schema is missing or incompatible; shortcut disabled');
+            return;
+        }
 
         try {
             Main.wm.addKeybinding(
