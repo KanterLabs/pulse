@@ -92,6 +92,10 @@ check_command() {
 
 printf 'Pulse Fedora compatibility doctor (read-only)\n'
 printf 'Repository: %s\n' "$PULSE_REPO_ROOT"
+if pulse_have_command git; then
+    source_revision=$(git -C "$PULSE_REPO_ROOT" rev-parse --short HEAD 2>/dev/null || true)
+    [[ -z "$source_revision" ]] || printf 'Source revision: %s\n' "$source_revision"
+fi
 if [[ "$DRY_RUN" -eq 1 ]]; then
     printf 'Mode: dry-run (no writes; probes are still read-only)\n'
 fi
@@ -137,6 +141,38 @@ show_command 'GNOME Shell' gnome-shell --version || warn 'gnome-shell is unavail
 show_command 'GNOME extensions CLI' gnome-extensions version || warn 'gnome-extensions is unavailable (extension cannot be enabled automatically)'
 show_command 'systemd user manager' systemctl --user --version || block 'systemctl is unavailable (user service cannot run)'
 show_command 'session bus tooling' busctl --user --version || warn 'busctl is unavailable (MPRIS probe is unavailable)'
+
+printf '\nGNOME extension state\n'
+if pulse_have_command gsettings; then
+    extensions_disabled=$(gsettings get org.gnome.shell disable-user-extensions 2>/dev/null || true)
+    case "$extensions_disabled" in
+        true) warn 'GNOME has disabled all user extensions; after installing the repair and logging out/in, check the Extensions app master switch' ;;
+        false) pass 'GNOME user extensions are allowed' ;;
+        *) warn 'cannot read the GNOME master extension switch from this session' ;;
+    esac
+fi
+if pulse_have_command gnome-extensions; then
+    extension_info=$(LC_ALL=C gnome-extensions info "$(pulse_uuid)" 2>/dev/null || true)
+    extension_state=$(printf '%s\n' "$extension_info" | sed -n 's/^[[:space:]]*State: //p')
+    case "$extension_state" in
+        ACTIVE|ENABLED) pass "Pulse extension state: $extension_state" ;;
+        *) warn "Pulse extension state: ${extension_state:-not visible to this Shell}; installed code needs logout/login before activation" ;;
+    esac
+fi
+installed_extension=$(pulse_extension_dir)
+if [[ -d "$installed_extension" ]] && pulse_have_command cmp; then
+    extension_matches=1
+    for code_file in extension.js dbus.js; do
+        if ! cmp -s "$PULSE_REPO_ROOT/extension/pulse@kanterlabs/$code_file" "$installed_extension/$code_file"; then
+            extension_matches=0
+        fi
+    done
+    if [[ "$extension_matches" -eq 1 ]]; then
+        pass 'installed Pulse JavaScript matches this checkout (a new login is still required after an upgrade)'
+    else
+        warn 'installed Pulse JavaScript differs from this checkout; reinstall from this source and log out/in to load it'
+    fi
+fi
 
 printf '\nBuild prerequisites\n'
 check_command 'Cargo' cargo required

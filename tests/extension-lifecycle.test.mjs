@@ -109,8 +109,9 @@ function fixture({failActorAt = 0} = {}) {
             this.menu = new Menu();
             // Mirrors the Shell's destroy callback: orphaned indicators with
             // this signal are exactly what generated the reported GC warning.
-            this.connect('destroy', () => this.menu.destroy());
+            this.connect('destroy', this._onDestroy.bind(this));
         }
+        _onDestroy() { this.menu.destroy(); }
     }
     class BarLevel extends Actor {
         set value(value) {
@@ -191,6 +192,7 @@ function fixture({failActorAt = 0} = {}) {
     vm.runInContext(source, context);
     const {PulseExtension, PulseIndicator} = context.subject;
     return {extension: new PulseExtension(), PulseIndicator, settings, actors, signals, sources,
+        nativeDestroy: actor => Actor.prototype.destroy.call(actor),
         bindings, connections, errors, launches, launchResults, Main, count: () => actorCount,
         advance: delta => { clock += delta; },
         assertClean() {
@@ -215,6 +217,29 @@ test('100 enable/disable cycles leave no actors, timers, signals or keybindings'
         f.extension.disable();
         f.assertClean();
     }
+});
+
+test('native panel destruction retires callbacks and connection before later disable', () => {
+    const f = fixture();
+    f.extension.enable();
+    const indicator = f.extension._indicator;
+    const connection = f.connections[0];
+    indicator.menu.toggle();
+    indicator._searchEntry.text = 'queued search';
+    indicator._scheduleSearch();
+    const queuedCallbacks = [...f.sources.values()];
+
+    // C-level destruction bypasses the public JavaScript destroy() override.
+    // Shell can then dispatch queued D-Bus/timer work from its shutdown loop.
+    f.nativeDestroy(indicator);
+    assert.equal(f.extension._indicator, null);
+    assert.equal(connection.destroyed, true);
+    for (const callback of queuedCallbacks)
+        callback();
+    connection.emit('connection-changed', false);
+    connection.emit('snapshot-changed');
+    f.extension.disable();
+    f.assertClean();
 });
 
 test('a stale shortcut schema never reaches the native keybinding API', () => {

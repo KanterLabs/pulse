@@ -144,9 +144,10 @@ and starts it by default. The GNOME extension is installed disabled because
 this tree is pre-alpha; the installer never enables it implicitly. Before an
 extension install or upgrade, it disables that UUID through `gnome-extensions`,
 including a stale enabled setting left after an earlier copy was removed. If
-an existing extension directory is present and that command is unavailable or
-fails, the installer stops before replacing any installed file; the old tree
-and install destinations remain unchanged. It does not use a GSettings
+an existing extension directory is present and that command is unavailable,
+fails, or Shell does not confirm Pulse is inactive, the installer stops before
+replacing any installed file; the old tree and install destinations remain
+unchanged. It does not use a GSettings
 fallback when an old tree is present. When the destination is absent, the
 installer can remove only Pulse's UUID from the enabled-extension setting
 through `gsettings` and verifies that it is gone. If it cannot confirm the
@@ -162,16 +163,24 @@ For the safest first run, install without starting the daemon:
 ./scripts/install-user.sh --no-start
 ```
 
-When the daemon is ready and the GNOME session is stable, opt in to the
-extension explicitly:
+After installation, log out and back in so GNOME loads the installed code.
+Then enable Pulse and check that its State is `ACTIVE` or `ENABLED`:
 
 ```bash
-./scripts/install-user.sh --enable-extension
+gnome-extensions enable pulse@kanterlabs
+gnome-extensions info pulse@kanterlabs
 ```
 
-`--enable-extension` cannot be combined with `--no-start`. Omitting the flag
-leaves the extension disabled; enable it later with
-`gnome-extensions enable pulse@kanterlabs` after checking the GNOME version.
+GNOME caches extension JavaScript until the Shell process ends. Disabling
+and re-enabling Pulse in the same session can execute the previous version,
+including a crash that has already been fixed on disk. Always log out/in
+after an upgrade before enabling it.
+
+For a fresh installation into a Shell session that can already discover the
+extension, `./scripts/install-user.sh --enable-extension` requests activation
+and checks the actual Shell state. On upgrades, this option installs the
+updated files and asks for logout/login before activation. It never enables
+the cached version. `--enable-extension` cannot be combined with `--no-start`.
 
 After installation, useful checks are:
 
@@ -283,6 +292,11 @@ journalctl --since today /usr/bin/gnome-shell
 
 Common causes:
 
+- **All GNOME extensions were turned off:** GNOME can do this after a Shell
+  crash during startup. Install the repaired Pulse source, log out/in, and
+  check the master switch in the Extensions app before enabling Pulse.
+  The doctor reports this switch and Pulse's actual state. See the
+  [repair procedure](docs/TROUBLESHOOTING.md#all-gnome-extensions-get-turned-off).
 - **The panel indicator is missing:** verify the UUID with
   `gnome-extensions info pulse@kanterlabs`, confirm that your GNOME major
   version is supported, and log out/in if the shell did not reload the

@@ -996,7 +996,7 @@ class PulseIndicator extends PanelMenu.Button {
             cleanup(() => GLib.Source.remove(id));
     }
 
-    destroy() {
+    _releaseResources() {
         if (this._destroyed)
             return;
         this._destroyed = true;
@@ -1025,6 +1025,20 @@ class PulseIndicator extends PanelMenu.Button {
         this._pendingAuthorizationUrl = '';
         this._connection = null;
         this._settings = null;
+    }
+
+    _onDestroy() {
+        // Shell can destroy the panel from native code during logout without
+        // calling this JavaScript destroy() method. Cancel callbacks before
+        // PanelMenu destroys the menu, including its open-state handlers.
+        this._releaseResources();
+        super._onDestroy();
+    }
+
+    destroy() {
+        if (this._destroyed)
+            return;
+        this._releaseResources();
         super.destroy();
     }
 });
@@ -1038,6 +1052,13 @@ export default class PulseExtension extends Extension {
             this._settings = this.getSettings();
             this._connection = new PulseConnection();
             this._indicator = new PulseIndicator();
+            this._indicatorDestroyId = this._indicator.connect('destroy', () => {
+                // Native panel teardown must also retire the daemon client,
+                // settings callbacks and shortcut owned by the extension.
+                this._indicator = null;
+                this._indicatorDestroyId = 0;
+                this.disable();
+            });
             this._indicator.initialize(this._connection, this._settings, this.dir);
             Main.panel.addToStatusArea(this.uuid, this._indicator, 1, 'right');
 
@@ -1063,6 +1084,9 @@ export default class PulseExtension extends Extension {
         this._settingsSignalIds = [];
         const indicator = this._indicator;
         this._indicator = null;
+        if (indicator && this._indicatorDestroyId)
+            cleanup(() => indicator.disconnect(this._indicatorDestroyId));
+        this._indicatorDestroyId = 0;
         if (indicator)
             cleanup(() => indicator.destroy());
         const connection = this._connection;

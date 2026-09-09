@@ -38,6 +38,7 @@ class InstallerFixture:
         self.fake_bin = self.root / "fake-bin"
         self.command_log = self.root / "commands.log"
         self.gnome_log = self.root / "gnome-extensions.log"
+        self.extension_state = self.root / "gnome-extension-state"
         self.gsettings_state = self.root / "gsettings-enabled-extensions"
         self.daemon = self.root / "input" / "pulse-daemon"
         self.extension_source = (
@@ -77,8 +78,33 @@ fi
             """#!/bin/sh
 printf '%s\n' "$*" >> "$PULSE_TEST_GNOME_LOG"
 case "${1:-}" in
-    disable) exit "${PULSE_TEST_DISABLE_STATUS:-0}" ;;
-    enable) exit "${PULSE_TEST_ENABLE_STATUS:-0}" ;;
+    disable)
+        status="${PULSE_TEST_DISABLE_STATUS:-0}"
+        if [ "$status" -ne 0 ]; then
+            exit "$status"
+        fi
+        printf '%s\n' "${PULSE_TEST_EXTENSION_STATE_AFTER_DISABLE:-INACTIVE}" > "$PULSE_TEST_EXTENSION_STATE_FILE"
+        exit 0
+        ;;
+    enable)
+        status="${PULSE_TEST_ENABLE_STATUS:-0}"
+        if [ "$status" -ne 0 ]; then
+            exit "$status"
+        fi
+        printf '%s\n' "${PULSE_TEST_EXTENSION_STATE_AFTER_ENABLE:-${PULSE_TEST_EXTENSION_STATE:-ACTIVE}}" > "$PULSE_TEST_EXTENSION_STATE_FILE"
+        exit 0
+        ;;
+    info)
+        if [ -f "$PULSE_TEST_EXTENSION_STATE_FILE" ]; then
+            state=$(cat "$PULSE_TEST_EXTENSION_STATE_FILE")
+        else
+            state="${PULSE_TEST_EXTENSION_STATE:-ACTIVE}"
+        fi
+        printf '  State: %s\n' "$state"
+        if [ -n "${PULSE_TEST_EXTENSION_STATE_AFTER_INFO:-}" ]; then
+            printf '%s\n' "$PULSE_TEST_EXTENSION_STATE_AFTER_INFO" > "$PULSE_TEST_EXTENSION_STATE_FILE"
+        fi
+        ;;
     *) exit 0 ;;
 esac
 """,
@@ -113,6 +139,10 @@ exit 0
 printf 'gsettings %s\n' "$*" >> "$PULSE_TEST_COMMAND_LOG"
 case "${1:-}" in
     get)
+        if [ "${3:-}" = disable-user-extensions ]; then
+            printf '%s\n' "${PULSE_TEST_EXTENSIONS_DISABLED:-false}"
+            exit 0
+        fi
         if [ -f "$PULSE_TEST_GSETTINGS_STATE" ]; then
             cat "$PULSE_TEST_GSETTINGS_STATE"
         else
@@ -164,8 +194,10 @@ esac
                 "XDG_CACHE_HOME": str(self.cache_home),
                 "PULSE_TEST_COMMAND_LOG": str(self.command_log),
                 "PULSE_TEST_GNOME_LOG": str(self.gnome_log),
+                "PULSE_TEST_EXTENSION_STATE_FILE": str(self.extension_state),
                 "PULSE_TEST_DISABLE_STATUS": "0",
                 "PULSE_TEST_ENABLE_STATUS": "0",
+                "PULSE_TEST_EXTENSION_STATE_AFTER_DISABLE": "INACTIVE",
                 "PULSE_TEST_GSETTINGS_STATE": str(self.gsettings_state),
                 "PULSE_TEST_GSETTINGS_ENABLED": "@as []",
                 "PULSE_TEST_GSETTINGS_GET_STATUS": "0",
@@ -249,7 +281,7 @@ class InstallerTests(unittest.TestCase):
         self.assertSuccessful(result)
         self.assertEqual(
             self.fixture.gnome_log_lines(),
-            ["disable pulse@kanterlabs"],
+            ["disable pulse@kanterlabs", "info pulse@kanterlabs"],
         )
         self.assertNotIn("enable pulse@kanterlabs", self.fixture.gnome_log_lines())
         self.assertIn("enable --now pulse-daemon.service", self.fixture.command_log_text())
@@ -261,6 +293,7 @@ class InstallerTests(unittest.TestCase):
         for path, contents in preserved.items():
             self.assertEqual(path.read_bytes(), contents, msg=f"runtime data changed: {path}")
         self.assertIn("left disabled", result.stdout)
+        self.assertIn("log out and back in before enabling Pulse", result.stdout)
 
     def test_fresh_install_does_not_auto_enable_extension(self) -> None:
         preserved = self.fixture.create_populated_runtime_state()
@@ -277,20 +310,116 @@ class InstallerTests(unittest.TestCase):
             "// new extension fixture\n",
         )
         self.assertNotIn("enable pulse@kanterlabs", self.fixture.gnome_log_lines())
+        self.assertIn("enable Pulse once GNOME sees the fresh install", result.stdout)
+        self.assertNotIn("log out and back in before enabling Pulse", result.stdout)
         for path, contents in preserved.items():
             self.assertEqual(path.read_bytes(), contents, msg=f"runtime data changed: {path}")
 
     def test_enable_extension_requires_explicit_flag(self) -> None:
-        self.fixture.install_old_extension()
-
         result = self.fixture.run("--enable-extension")
 
         self.assertSuccessful(result)
         self.assertEqual(
             self.fixture.gnome_log_lines(),
-            ["disable pulse@kanterlabs", "enable pulse@kanterlabs"],
+            ["disable pulse@kanterlabs", "enable pulse@kanterlabs", "info pulse@kanterlabs"],
         )
-        self.assertIn("GNOME extension enabled", result.stdout)
+        self.assertIn("GNOME extension enabled and verified active", result.stdout)
+
+    def test_upgrade_never_reenables_cached_code_even_on_repeated_install(self) -> None:
+        self.fixture.install_old_extension()
+        preserved = self.fixture.create_populated_runtime_state()
+
+        for _ in range(2):
+            result = self.fixture.run("--enable-extension")
+            self.assertSuccessful(result)
+            self.assertIn("log out and back in to load the new code", result.stdout)
+            self.assertNotIn("GNOME extension enabled", result.stdout)
+            self.assertNotIn("enable pulse@kanterlabs", self.fixture.gnome_log_lines())
+            for path, contents in preserved.items():
+                self.assertEqual(path.read_bytes(), contents, msg=f"runtime data changed: {path}")
+
+    def test_upgrade_refuses_replacement_when_disable_reports_active(self) -> None:
+        self._assert_upgrade_refuses_active_disable_state("ACTIVE")
+
+    def test_upgrade_waits_for_accepted_disable_to_finish(self) -> None:
+        self.fixture.install_old_extension()
+        preserved = self.fixture.create_populated_runtime_state()
+
+        result = self.fixture.run(
+            "--no-start",
+            PULSE_TEST_EXTENSION_STATE_AFTER_DISABLE="ACTIVE",
+            PULSE_TEST_EXTENSION_STATE_AFTER_INFO="INACTIVE",
+        )
+
+        self.assertSuccessful(result)
+        self.assertEqual(
+            self.fixture.gnome_log_lines(),
+            ["disable pulse@kanterlabs", "info pulse@kanterlabs", "info pulse@kanterlabs"],
+        )
+        self.assertEqual(
+            (self.fixture.extension_dir / "extension.js").read_text(encoding="utf-8"),
+            "// new extension fixture\n",
+        )
+        for path, contents in preserved.items():
+            self.assertEqual(path.read_bytes(), contents, msg=f"runtime data changed: {path}")
+
+    def test_upgrade_refuses_replacement_when_disable_reports_error(self) -> None:
+        self._assert_upgrade_refuses_active_disable_state("ERROR")
+
+    def _assert_upgrade_refuses_active_disable_state(self, state: str) -> None:
+        self.fixture.install_old_extension()
+        preserved = self.fixture.create_populated_runtime_state()
+        self.fixture.daemon_destination.write_bytes(b"old daemon\n")
+
+        result = self.fixture.run(
+            "--no-start",
+            PULSE_TEST_EXTENSION_STATE_AFTER_DISABLE=state,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("could not confirm GNOME extension", result.stderr)
+        self.assertIn(f"state: {state}", result.stderr)
+        commands = self.fixture.gnome_log_lines()
+        self.assertEqual(commands[0], "disable pulse@kanterlabs")
+        self.assertTrue(all(command == "info pulse@kanterlabs" for command in commands[1:]))
+        self.assertEqual(
+            (self.fixture.extension_dir / "extension.js").read_text(encoding="utf-8"),
+            "// old extension fixture\n",
+        )
+        self.assertEqual(self.fixture.daemon_destination.read_bytes(), b"old daemon\n")
+        self.assertFalse(self.fixture.systemd_dir.exists())
+        self.assertFalse(self.fixture.dbus_dir.exists())
+        self.assertFalse((self.fixture.data_home / "pulse-extension-quarantine").exists())
+        for path, contents in preserved.items():
+            self.assertEqual(path.read_bytes(), contents, msg=f"runtime data changed: {path}")
+
+    def test_accepted_enable_request_with_shell_error_is_not_success(self) -> None:
+        result = self.fixture.run("--enable-extension", PULSE_TEST_EXTENSION_STATE="ERROR")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("state: ERROR", result.stderr)
+        self.assertIn("it was disabled again", result.stderr)
+        self.assertNotIn("GNOME extension enabled", result.stdout)
+        self.assertEqual(
+            self.fixture.gnome_log_lines()[-2:],
+            ["disable pulse@kanterlabs", "info pulse@kanterlabs"],
+        )
+
+    def test_global_extension_disable_is_reported_without_changing_the_switch(self) -> None:
+        result = self.fixture.run(
+            "--enable-extension",
+            PULSE_TEST_EXTENSION_STATE="INACTIVE",
+            PULSE_TEST_EXTENSIONS_DISABLED="true",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("GNOME has turned off user extensions globally", result.stderr)
+        self.assertNotIn("GNOME extension enabled", result.stdout)
+        self.assertEqual(
+            self.fixture.gnome_log_lines()[-2:],
+            ["disable pulse@kanterlabs", "info pulse@kanterlabs"],
+        )
+        self.assertNotIn("gsettings set", self.fixture.command_log_text())
 
     def test_no_start_upgrade_keeps_daemon_inactive_and_data_intact(self) -> None:
         self.fixture.install_old_extension()
@@ -301,10 +430,11 @@ class InstallerTests(unittest.TestCase):
         self.assertSuccessful(result)
         self.assertEqual(
             self.fixture.gnome_log_lines(),
-            ["disable pulse@kanterlabs"],
+            ["disable pulse@kanterlabs", "info pulse@kanterlabs"],
         )
         self.assertNotIn("enable --now pulse-daemon.service", self.fixture.command_log_text())
         self.assertIn("activation was skipped (--no-start)", result.stdout)
+        self.assertIn("log out and back in before enabling Pulse", result.stdout)
         for path, contents in preserved.items():
             self.assertEqual(path.read_bytes(), contents, msg=f"runtime data changed: {path}")
         with sqlite3.connect(self.fixture.data_home / "pulse" / "pulse.sqlite3") as database:
@@ -314,20 +444,31 @@ class InstallerTests(unittest.TestCase):
             )
 
     def test_failed_activation_is_disabled_again(self) -> None:
-        self.fixture.install_old_extension()
-
         result = self.fixture.run("--enable-extension", PULSE_TEST_ENABLE_STATUS="1")
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(
-            self.fixture.gnome_log_lines(),
-            [
-                "disable pulse@kanterlabs",
-                "enable pulse@kanterlabs",
-                "disable pulse@kanterlabs",
-            ],
-        )
+        self.assertEqual(self.fixture.gnome_log_lines(), [
+            "disable pulse@kanterlabs", "enable pulse@kanterlabs",
+            "disable pulse@kanterlabs", "info pulse@kanterlabs",
+        ])
         self.assertIn("it was disabled again", result.stderr)
+
+    def test_failed_activation_requires_verified_rollback(self) -> None:
+        result = self.fixture.run(
+            "--enable-extension",
+            PULSE_TEST_ENABLE_STATUS="1",
+            PULSE_TEST_EXTENSION_STATE_AFTER_DISABLE="ACTIVE",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("disabled state could not be confirmed", result.stderr)
+        self.assertIn("state: ACTIVE", result.stderr)
+        commands = self.fixture.gnome_log_lines()
+        self.assertEqual(commands[:3], [
+            "disable pulse@kanterlabs", "enable pulse@kanterlabs", "disable pulse@kanterlabs",
+        ])
+        self.assertTrue(commands[3:])
+        self.assertTrue(all(command == "info pulse@kanterlabs" for command in commands[3:]))
 
     def test_failed_disable_aborts_existing_upgrade_without_mutation(self) -> None:
         self.fixture.install_old_extension()

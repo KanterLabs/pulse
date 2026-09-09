@@ -1,0 +1,7 @@
+{
+  "uuid": "sentinel@pulse-smoke",
+  "name": "Pulse Smoke Sentinel",
+  "description": "A minimal second extension used by the native lifecycle smoke test.",
+  "version": 1,
+  "shell-version": ["49"]
+}
