@@ -28,9 +28,12 @@ Pulse is a native per-user application made of two cooperating pieces:
 - a Rust daemon for the session-bus API, Spotify Web API access, local cache,
   secrets, and playback control through MPRIS.
 
-The official Spotify application remains the playback engine. Pulse does not
-decode, proxy, download, or cache audio, and it is not intended to replace the
-Spotify client.
+The installed extension currently uses the official Spotify application as
+its playback engine. Independent playback is being developed in a separate
+[browser prototype](experiments/web-playback/README.md), following the
+[staged implementation plan](docs/INDEPENDENT_PLAYBACK_PLAN.md). The prototype
+has login and playback controls, but real-account audio and a background
+runtime must pass validation before replacing the production backend.
 
 ## Feature status
 
