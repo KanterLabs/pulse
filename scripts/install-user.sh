@@ -29,7 +29,7 @@ Options:
   --debug               install the debug build
   --no-build            use an existing target artifact
   --no-start            install files without enabling/starting the daemon
-  --enable-extension    enable the GNOME extension after installation
+  --enable-extension    activate a fresh install; upgrades require logout/login
   --dry-run             print planned actions without writing or reloading
   -h, --help            show this help
 
@@ -169,7 +169,9 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
         else
             pulse_info "would ensure the GNOME extension is disabled before installation"
         fi
-        if [[ "$ENABLE_EXTENSION" -eq 1 ]]; then
+        if [[ "$ENABLE_EXTENSION" -eq 1 && "$extension_destination_exists" -eq 1 ]]; then
+            pulse_info 'would require logout/login before enabling the upgraded extension'
+        elif [[ "$ENABLE_EXTENSION" -eq 1 ]]; then
             pulse_info 'would enable the GNOME extension (--enable-extension)'
         else
             pulse_info 'would leave the GNOME extension disabled (pass --enable-extension to activate it)'
@@ -230,6 +232,9 @@ disable_existing_extension() {
     fi
 
     if pulse_have_command gnome-extensions && gnome-extensions disable "$(pulse_uuid)" >/dev/null 2>&1; then
+        if [[ "$extension_destination_exists" -eq 1 ]] && ! verify_extension_inactive; then
+            pulse_die "could not confirm GNOME extension $(pulse_uuid) is inactive; refusing to replace $EXTENSION_DIR"
+        fi
         if [[ "$extension_destination_exists" -eq 1 ]]; then
             pulse_info "existing GNOME extension $(pulse_uuid) disabled before replacement"
         else
@@ -248,6 +253,51 @@ disable_existing_extension() {
     fi
 
     pulse_die "could not confirm GNOME extension $(pulse_uuid) is disabled; refusing to install $EXTENSION_DIR"
+}
+
+verify_extension_inactive() {
+    local info=''
+    local state=''
+    local attempt
+
+    # The CLI can return success after Shell accepts the request, even when
+    # the extension callback fails.  Require an explicit non-active state
+    # before replacing files or claiming rollback succeeded.
+    for ((attempt = 0; attempt < 30; attempt++)); do
+        info=$(LC_ALL=C gnome-extensions info "$(pulse_uuid)" 2>/dev/null) || info=''
+        state=$(printf '%s\n' "$info" | sed -n 's/^[[:space:]]*State: //p')
+        case "$state" in
+            DISABLED|INACTIVE|INITIALIZED|OUT_OF_DATE) return 0 ;;
+            ERROR|UNINSTALLED) break ;;
+        esac
+        sleep 0.1
+    done
+    pulse_warn "Pulse did not become inactive (state: ${state:-unavailable})"
+    return 1
+}
+
+verify_extension_active() {
+    local info
+    local state
+    local attempt
+
+    # The CLI reports that Shell accepted the enable request, even if enable()
+    # throws or the global extensions switch is off. Check the actual state.
+    for ((attempt = 0; attempt < 30; attempt++)); do
+        info=$(LC_ALL=C gnome-extensions info "$(pulse_uuid)" 2>/dev/null) || info=''
+        state=$(printf '%s\n' "$info" | sed -n 's/^[[:space:]]*State: //p')
+        case "$state" in
+            ACTIVE|ENABLED) return 0 ;;
+            ERROR|OUT_OF_DATE|UNINSTALLED) break ;;
+        esac
+        sleep 0.1
+    done
+    pulse_warn "Pulse did not become active (state: ${state:-unavailable})"
+    if pulse_have_command gsettings &&
+        [[ "$(gsettings get org.gnome.shell disable-user-extensions 2>/dev/null)" == true ]]; then
+        pulse_warn 'GNOME has turned off user extensions globally; check the Extensions app master switch after installing the repair and logging out/in'
+    fi
+    return 1
 }
 
 # Build each destination in its own parent filesystem.  This is important for
@@ -347,24 +397,43 @@ if [[ "$NO_START" -eq 0 ]]; then
     fi
 
     if [[ -n "$EXTENSION_SOURCE" && "$ENABLE_EXTENSION" -eq 1 ]]; then
-        if ! pulse_have_command gnome-extensions; then
-            pulse_die 'cannot enable the GNOME extension: gnome-extensions is unavailable; run gnome-extensions enable pulse@kanterlabs from a GNOME session'
-        fi
-        if gnome-extensions enable "$(pulse_uuid)"; then
-            pulse_info 'GNOME extension enabled'
+        if [[ "$extension_destination_exists" -eq 1 ]]; then
+            # GJS keeps imported modules for the life of the Shell process.
+            # Enabling here can execute the old code we just replaced, even
+            # after a successful disable and even on a second installer run.
+            pulse_info 'GNOME extension updated; log out and back in to load the new code'
+            pulse_info 'after logging back in, enable Pulse: gnome-extensions enable pulse@kanterlabs'
+            pulse_info 'then verify its State is ACTIVE or ENABLED: gnome-extensions info pulse@kanterlabs'
+        elif gnome-extensions enable "$(pulse_uuid)" && verify_extension_active; then
+            pulse_info 'GNOME extension enabled and verified active'
         else
             if gnome-extensions disable "$(pulse_uuid)" >/dev/null 2>&1; then
-                pulse_die 'GNOME extension could not be enabled; it was disabled again and remains installed. Run: gnome-extensions enable pulse@kanterlabs'
+                if verify_extension_inactive; then
+                    pulse_die 'GNOME extension could not be activated; it was disabled again and remains installed. Log out and back in, then run: gnome-extensions enable pulse@kanterlabs; verify with: gnome-extensions info pulse@kanterlabs'
+                fi
+                pulse_die 'GNOME extension could not be enabled and its disabled state could not be confirmed. Inspect it with: gnome-extensions info pulse@kanterlabs; disable it before retrying'
             else
                 pulse_die 'GNOME extension could not be enabled and its disabled state could not be confirmed. Inspect it with: gnome-extensions info pulse@kanterlabs; disable it before retrying'
             fi
         fi
     elif [[ -n "$EXTENSION_SOURCE" ]]; then
-        pulse_info 'GNOME extension installed but left disabled (pass --enable-extension to activate it)'
+        pulse_info 'GNOME extension installed but left disabled'
+        if [[ "$extension_destination_exists" -eq 1 ]]; then
+            pulse_info 'log out and back in before enabling Pulse so GNOME loads the updated code'
+            pulse_info 'enable after logging back in: gnome-extensions enable pulse@kanterlabs'
+        else
+            pulse_info 'enable Pulse once GNOME sees the fresh install: gnome-extensions enable pulse@kanterlabs'
+        fi
     fi
 else
     if [[ -n "$EXTENSION_SOURCE" ]]; then
         pulse_info 'daemon activation was skipped (--no-start); GNOME extension remains disabled'
+        if [[ "$extension_destination_exists" -eq 1 ]]; then
+            pulse_info 'log out and back in before enabling Pulse so GNOME loads the updated code'
+            pulse_info 'enable after logging back in: gnome-extensions enable pulse@kanterlabs'
+        else
+            pulse_info 'enable Pulse once GNOME sees the fresh install: gnome-extensions enable pulse@kanterlabs'
+        fi
     else
         pulse_info 'daemon activation was skipped (--no-start)'
     fi

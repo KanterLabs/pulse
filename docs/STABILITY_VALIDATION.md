@@ -21,6 +21,8 @@ string-array type before invoking Mutter.
 - Retain the indicator before building its menu; attach subtrees promptly and
   roll back widgets, signals, sources, and keybindings after failed startup.
 - Make teardown idempotent and ignore late callbacks after destruction.
+- Handle native panel destruction as well as explicit extension disable, so
+  Shell shutdown cannot dispatch daemon replies into disposed widgets.
 - Let the Shell extension manager manage stylesheets, and remove unsupported
   tooltip calls.
 - Render finite progress values using elapsed monotonic time. Schedule progress
@@ -28,8 +30,10 @@ string-array type before invoking Mutter.
 - Launch the browser asynchronously and cancel pending launch work on disable.
 - Cancel stale D-Bus requests and reject results from previous connections;
   bound in-flight work and normalize malformed payloads.
-- Disable the extension before installation. Activation is an explicit option;
-  normal installation preserves configuration, tokens, database, and cache.
+- Verify the existing extension is inactive before replacement. Fresh activation
+  checks the actual Shell state; upgrades require logout/login so GJS cannot
+  execute the previously cached module. Configuration, tokens, database, and
+  cache remain intact.
 
 ## Regression checks
 
@@ -54,14 +58,32 @@ schema is changed by this repair.
 The CI static job now requires the Node regression tests and installer tests.
 Syntax checks alone cannot detect GObject lifetime or missing Shell API errors.
 
+On 2026-09-09, the extended native test exposed callbacks into disposed Pulse
+widgets when Shell shut down with the extension still enabled. Native actor
+destruction bypassed the JavaScript `destroy()` override. Resource cleanup now
+also runs from `PanelMenu.Button`'s native destroy callback before menu teardown,
+and the extension retires its connection, settings callbacks, and shortcut.
+All 27 Node tests pass, including direct native-style destruction and late
+callbacks. All 16 installer tests pass, including accepted-but-failed disable,
+delayed disable completion, activation errors, and populated-data preservation.
+The release build and schema compilation also pass; this host still needs
+`TMPDIR` under `target/` because its `/tmp` quota is exhausted.
+
 ## Native test and remaining desktop validation
 
 The isolated Fedora 43 test using GNOME Shell 49.9, Mutter 49.7, and GJS 1.86
 passed ten enable/menu/disable/forced-GC cycles and offline reconnect after the
-shortcut fix. Native smoke commands and limits are recorded in
-[tests/gnome-smoke](../tests/gnome-smoke/README.md). A
-software-rendered isolated Shell test cannot verify the laptop's graphics
-hardware, other installed extensions, suspend/resume, or a long-running Spotify
-session. Keep Pulse disabled on the affected laptop until the repair is reviewed
-and crash evidence can be checked. Use the recovery instructions in
-[TROUBLESHOOTING.md](TROUBLESHOOTING.md) if GNOME cannot stay running.
+shortcut fix. On 2026-09-09 the extended test also passed connected playback
+controls, artwork, populated views/search, daemon owner replacement, direct C
+actor destruction, and shutdown with Pulse enabled. A separate sentinel
+extension remained enabled, and GNOME's global extension switch stayed unchanged.
+Native smoke commands and limits are recorded in
+[tests/gnome-smoke](../tests/gnome-smoke/README.md).
+
+The isolated software-rendered test cannot verify the laptop's graphics
+hardware, its particular extension combination, suspend/resume, or an
+authenticated Spotify session. Install the repaired checkout, log out/in,
+then enable Pulse and check its actual state using
+[TROUBLESHOOTING.md](TROUBLESHOOTING.md#all-gnome-extensions-get-turned-off).
+The new login is necessary because [GNOME retains imported extension code
+until the Shell process ends](https://gjs.guide/extensions/development/debugging.html#reloading-extensions).

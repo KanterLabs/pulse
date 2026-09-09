@@ -23,6 +23,37 @@ journalctl --since today /usr/bin/gnome-shell
 Before sharing logs, remove access tokens, refresh tokens, authorization
 codes, client secrets, private paths, and unrelated desktop information.
 
+## All GNOME extensions get turned off
+
+GNOME Shell can disable all user extensions after a startup crash. Pulse's
+original shortcut registration could abort the Shell: it requested a key
+that was absent from its GSettings schema. The repair uses the correct key
+and checks its type before calling the native API. See
+[the validation record](STABILITY_VALIDATION.md).
+
+Install from the repaired source, then start a new login session:
+
+```bash
+./scripts/install-user.sh
+```
+
+Log out and back in. This step matters: GNOME keeps old extension JavaScript
+in memory even after its files are replaced. Toggling Pulse in the same
+session does not load the repair. Once logged back in, turn on the master
+switch in the Extensions app if GNOME turned it off, then enable Pulse:
+
+```bash
+gnome-extensions enable pulse@kanterlabs
+gnome-extensions info pulse@kanterlabs
+./scripts/doctor-fedora.sh
+```
+
+The State should be `ACTIVE` or `ENABLED`. A successful exit from
+`gnome-extensions enable` alone does not confirm that Pulse is running.
+If it still fails in the new session, retain the Shell log around that
+attempt and its extension state. This installer changes only Pulse's
+enabled status; it never resets other extensions or the global switch.
+
 ## Installation and service failures
 
 The expected install is per-user. The installer refuses root and should not
@@ -50,14 +81,17 @@ pre-alpha. Every install or upgrade that includes extension files first runs:
 gnome-extensions disable pulse@kanterlabs
 ```
 
-If that command is unavailable or fails while an old extension directory is
-present, the installer stops before replacing any installed file. The old
+If that command is unavailable, fails, or does not leave Pulse inactive while
+an old extension directory is present, the installer stops before replacing
+any installed file. The old
 tree, daemon, and integration files remain unchanged, and it does not use a
 GSettings fallback for that existing tree. From a working GNOME session,
 disable the UUID manually and retry. When the destination is absent, a stale
 enabled UUID can be removed through `gsettings`; the installer verifies that
 Pulse's UUID is gone and stops before writing files if it cannot confirm this.
-Pulse runtime data remains untouched in either case.
+Pulse runtime data remains untouched in either case. If Pulse stays in the
+`ERROR` state after disabling it, log out/in with Pulse disabled before retrying
+the installation.
 
 If GNOME is unavailable after the extension was explicitly enabled, use a text
 console for this explicit filesystem recovery command. The installer does not
@@ -81,12 +115,18 @@ and omit `--enable-extension` until the compatibility check is complete. This
 recovery procedure does not by itself establish the cause of a reboot or other
 laptop failure.
 
-After a successful install, the daemon is enabled and started by default, but
-the extension remains disabled until activation is requested explicitly:
+After a successful install, the daemon is enabled and started by default.
+Log out and back in before activating an upgraded extension:
 
 ```bash
-./scripts/install-user.sh --enable-extension
+gnome-extensions enable pulse@kanterlabs
+gnome-extensions info pulse@kanterlabs
 ```
+
+`./scripts/install-user.sh --enable-extension` can activate a fresh install
+and verifies its actual Shell state. When replacing an existing extension,
+it installs the new files but defers activation until after logout/login so
+the old cached module cannot run again.
 
 For a staged install with no service activation, use `--no-start`; it cannot
 be combined with `--enable-extension`. To activate an already installed
@@ -98,8 +138,8 @@ gnome-extensions enable pulse@kanterlabs
 
 The installer reloads the user systemd manager and session D-Bus activation
 configuration. If a service or D-Bus change is not visible, run
-`systemctl --user daemon-reload`, restart the daemon, and log out/in when the
-GNOME Shell session does not support a safe extension reload. Runtime files
+`systemctl --user daemon-reload` and restart the daemon. Extension code changes
+require a new Shell process; on Wayland, log out/in. Runtime files
 under the configured Pulse config, data, and cache directories are preserved
 through installs, upgrades, and the default uninstall. Do not use
 `--purge` while recovering unless data deletion is explicitly intended.
@@ -124,7 +164,7 @@ gnome-extensions enable pulse@kanterlabs
 ```
 
 If the extension was installed while Shell was running, log out and back in
-when the current session does not support a safe Shell reload. A disabled
+to load the installed code. A disabled
 extension or an unsupported `shell-version` is a compatibility issue, not a
 Spotify login issue. If enabling it makes GNOME unstable, disable it again and
 retry the installer without `--enable-extension`; installed runtime data is
