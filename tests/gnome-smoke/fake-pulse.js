@@ -171,6 +171,7 @@ class PulseFixture {
         return json({
             authenticated: this._authenticated,
             client_id_configured: true,
+            playback_backend: 'browser',
             state: this._authenticated ? 'authenticated' : 'unauthenticated',
             error: '',
         });

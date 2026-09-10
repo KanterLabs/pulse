@@ -50,7 +50,7 @@ export default class PulsePreferences extends ExtensionPreferences {
         });
         const playbackGroup = new Adw.PreferencesGroup({
             title: 'Playback',
-            description: 'Keep the controls close while Spotify does the playing.',
+            description: 'Control your music from the GNOME panel.',
         });
         playbackGroup.add(bindSwitch(
             settings,

@@ -340,3 +340,8 @@ test('view request bookkeeping stays bounded across arbitrary view names', () =>
     connection.destroy();
     assert.equal(proxy.handlers.size, 0);
 });
+
+test('authentication parsing preserves the independent playback mode without accepting arbitrary backends', () => {
+    assert.equal(parseAuthState({authenticated: true, playback_backend: 'browser'}).playback_backend, 'browser');
+    assert.equal(parseAuthState({authenticated: true, playback_backend: 'arbitrary'}).playback_backend, 'mpris');
+});

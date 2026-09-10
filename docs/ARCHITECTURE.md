@@ -7,7 +7,7 @@ the [Fedora laptop implementation plan](FEDORA_IMPLEMENTATION_PLAN.md).
 
 ## Process boundary
 
-Pulse has one UI process and one per-user service:
+Pulse has one UI process, one daemon, and an optional isolated player service:
 
 ```text
 GNOME Shell
@@ -16,11 +16,13 @@ GNOME Shell
              │  io.kanterlabs.Pulse1
              ▼
 systemd --user
-└── pulse-daemon
-    ├── MPRIS client for the official Spotify desktop client
-    ├── Spotify OAuth 2.0 Authorization Code + PKCE
-    ├── Web API client, rate limiting, retry, and stale-while-revalidate
-    ├── SQLite metadata cache and bounded artwork cache
+├── pulse-daemon
+│   ├── MPRIS client or bounded browser-player bridge
+│   ├── Web API client, rate limiting, retry, and stale-while-revalidate
+│   └── SQLite metadata cache and bounded artwork cache
+└── pulse-player (independent playback option)
+    ├── loopback PKCE and restricted daemon bridge
+    ├── headless Google Chrome + Spotify Web Playback SDK
     └── Secret Service storage for refresh tokens
 ```
 
@@ -66,11 +68,12 @@ verified backup before a migration.
 
 ## Playback and API policy
 
-The official Spotify client remains the playback mechanism. Pulse discovers
-its MPRIS player on the session bus and prefers local controls for the first
-mini-player milestone. Spotify Web API playback control is optional and
-capability-gated; API access may return permission, quota, rate-limit, or
-endpoint-availability errors, and the UI must distinguish those states.
+Pulse selects one playback backend at daemon startup. The original backend
+controls the official Spotify client through MPRIS. The independent backend
+sends bounded commands through a private loopback descriptor to a separately
+supervised headless Chrome player. The daemon re-reads and validates that
+descriptor on every request, and player loss becomes an offline snapshot rather
+than a GNOME Shell failure. Spotify API access remains capability-gated.
 
 Pulse does not decode, proxy, download, or cache audio. Spotify metadata and
 artwork should retain attribution and a link back to Spotify, preserve the
@@ -79,8 +82,9 @@ complete source image, and avoid destructive cropping or overlays.
 ## Lifecycle
 
 1. `systemd --user` starts `pulse-daemon` from the installed per-user path.
-2. The daemon connects to the session bus, discovers Spotify's MPRIS player if
-   present, and serves the versioned interface.
+2. The daemon connects to the session bus and serves the versioned interface.
+   It either discovers Spotify through MPRIS or connects to the independent
+   player service through its private runtime descriptor.
 3. The extension connects asynchronously and renders a calm disconnected state
    when the daemon or Spotify is unavailable.
 4. User actions become bounded D-Bus requests. Obsolete search requests are
@@ -100,7 +104,7 @@ integration files only. Explicit data deletion is a separate operation.
 
 The daemon and extension should expose distinct user-visible states for:
 
-- Spotify closed or no MPRIS player;
+- Spotify closed/no MPRIS player, or independent player offline;
 - daemon unavailable or disconnected;
 - offline with stale cached data;
 - ordinary API rate limiting;

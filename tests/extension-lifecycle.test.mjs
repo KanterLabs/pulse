@@ -393,3 +393,23 @@ test('every widget allocation failure after the base indicator rolls back its pa
         try { f.assertClean(); } catch (error) { error.message += ` at allocation ${index}`; throw error; }
     }
 });
+
+test('independent mode hides the desktop Spotify launch and permits only the local setup root', () => {
+    const f = fixture();
+    f.extension.enable();
+    const indicator = f.extension._indicator;
+    indicator._authState = {playback_backend: 'browser', client_id_configured: false, authenticated: false};
+    indicator._renderSnapshot();
+    assert.equal(indicator._openButton.visible, false);
+    for (const uri of ['http://localhost:8888/', 'http://127.0.0.1:8888/evil',
+        'http://127.0.0.1:8888@evil.example/', 'http://127.0.0.1:65536/', 'file:///tmp/login']) {
+        indicator._pendingAuthorizationUrl = uri;
+        indicator._openAuthorizationUrl();
+        assert.equal(f.launches.length, 0);
+    }
+    indicator._pendingAuthorizationUrl = 'http://127.0.0.1:8888/';
+    indicator._openAuthorizationUrl();
+    assert.equal(f.launches.length, 1);
+    f.extension.disable();
+    f.assertClean();
+});
