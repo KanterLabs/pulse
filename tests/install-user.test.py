@@ -309,6 +309,36 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("left disabled", result.stdout)
         self.assertIn("log out and back in before enabling Pulse", result.stdout)
 
+    def test_independent_install_preserves_data_and_verifies_backup(self) -> None:
+        self.fixture.install_old_extension()
+        preserved = self.fixture.create_populated_runtime_state()
+        for name in ("google-chrome", "secret-tool"):
+            self.fixture._write_command(name, "#!/bin/sh\nexit 0\n")
+        state_home = self.fixture.root / "state"
+        result = self.fixture.run("--independent-playback", "--no-start", XDG_STATE_HOME=str(state_home))
+        self.assertSuccessful(result)
+        for path, contents in preserved.items():
+            self.assertEqual(path.read_bytes(), contents)
+        helper = self.fixture.data_home / "pulse/player"
+        self.assertTrue((helper / "run.mjs").is_file())
+        self.assertIn("--headless=new", (helper / "run.mjs").read_text())
+        self.assertIn("PULSE_PLAYBACK_BACKEND=browser", (
+            self.fixture.systemd_dir / "pulse-daemon.service.d/50-pulse-player.conf").read_text())
+        backups = list((state_home / "pulse/player-backups").iterdir())
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].stat().st_mode & 0o777, 0o700)
+        with sqlite3.connect(backups[0] / "pulse.sqlite3") as database:
+            self.assertEqual(database.execute("PRAGMA integrity_check").fetchone(), ("ok",))
+            self.assertEqual(database.execute("SELECT value FROM saved_fixture").fetchone(), ("Keep this row",))
+        self.assertNotIn("enable --now pulse-player.service", self.fixture.command_log_text())
+        # An ordinary subsequent update must retain the selected backend.
+        self.assertSuccessful(self.fixture.run("--no-start", XDG_STATE_HOME=str(state_home)))
+        self.assertTrue((helper / "run.mjs").is_file())
+        self.assertSuccessful(self.fixture.run_uninstaller())
+        self.assertFalse(helper.exists())
+        for path, contents in preserved.items():
+            self.assertEqual(path.read_bytes(), contents)
+
     def test_fresh_install_does_not_auto_enable_extension(self) -> None:
         preserved = self.fixture.create_populated_runtime_state()
 

@@ -1,5 +1,10 @@
 # Pulse: Fedora Laptop Implementation Plan
 
+> This document records the original MPRIS companion milestone. The optional
+> independent backend is tracked in
+> [INDEPENDENT_PLAYBACK_PLAN.md](INDEPENDENT_PLAYBACK_PLAN.md) and now
+> supersedes its playback direction.
+
 Status: implementation-ready plan  
 Updated: 2026-09-03  
 Target: Shane's Fedora Workstation laptop, with source copied from the mounted development VM
@@ -295,4 +300,3 @@ Spinners are allowed only for an explicitly user-requested uncached page. Existi
 - Spotify design and attribution rules: https://developer.spotify.com/documentation/design
 
 These are design inputs, not permanent assumptions. Spotify and GNOME behavior must be revalidated against their current primary documentation when the relevant milestone starts.
-

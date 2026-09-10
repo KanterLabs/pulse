@@ -1,13 +1,16 @@
 # Independent playback feasibility prototype
 
-This is stage 1 of the [independent playback plan](../../docs/INDEPENDENT_PLAYBACK_PLAN.md).
+This is the standalone test page from stage 1 of the
+[independent playback plan](../../docs/INDEPENDENT_PLAYBACK_PLAN.md).
 It creates a Spotify Web Playback SDK device and starts a track directly on
 that device through Spotify's Web API. The Spotify desktop application is
-not used by this code. **Real-account streaming has not yet been verified.**
+not used by this code. Real-account playback has been verified in visible
+Google Chrome; the installed headless service still needs laptop validation.
 
-This experiment does not install, restart, or change the daemon, GNOME
-extension, user services, configuration, keyring, or database. It is not yet
-the independent GNOME player release.
+This command does not install or change the daemon, GNOME extension, user
+services, configuration, keyring, or database. For the integrated headless
+player, run `./scripts/install-user.sh --independent-playback` from the
+repository root.
 
 ## Run on the laptop
 
@@ -39,9 +42,9 @@ Optional environment variables:
   in the Spotify app first. If port 8888 is occupied (for example by a pending
   Pulse login), complete/cancel that login or choose a different port.
 
-**Keep the player tab open.** Closing it stops audio. Minimize the browser
-to test background playback, but do not interpret this as proof of a packaged
-helper that can survive closing its own window.
+**Keep the standalone prototype tab open.** The installed player uses a
+separate headless Chrome process, so it has no player tab or visible window.
+Only its one-time Spotify sign-in opens in the normal browser.
 
 ## Credential boundary
 
@@ -82,16 +85,11 @@ Record the following on the laptop before choosing the production runtime:
 | Recovery | Offline/online, reconnect, logout, expired token and server restart |
 | Desktop safety | Pulse popover open/close; GNOME and other extensions remain healthy |
 
-Current evidence: Shane confirmed Premium. The available T3 embedded browser
-reports Chrome 150 on Linux and exposes encrypted-media APIs, but an actual
-`com.widevine.alpha` audio capability request returned `NotSupportedError`.
-That browser cannot be used to establish streaming feasibility. Laptop SSH
-responds but rejects the available authentication. Laptop Fedora/GNOME
-versions, real Spotify audio, and window-independent runtime remain unverified.
-
-Do not bundle an untested Electron/webview runtime or replace the installed
-playback backend based solely on these mock tests. Stages 2–7 remain gated
-on the real-account and background-runtime results.
+Current evidence: Shane confirmed Premium and successful real audio in Google
+Chrome through this prototype with the Spotify desktop application closed.
+The integrated service and its failure boundaries pass automated tests with
+Spotify and DRM simulated. Audible headless playback and sustained recovery
+still need validation on the Fedora laptop before a packaged release.
 
 References: [SDK setup](https://developer.spotify.com/documentation/web-playback-sdk/tutorials/getting-started),
 [SDK controls and events](https://developer.spotify.com/documentation/web-playback-sdk/reference),

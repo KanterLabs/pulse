@@ -1,10 +1,15 @@
 import {PlaybackProbe} from './player-core.mjs';
+import {PanelBridge} from './panel.mjs';
 
 const element = id => document.getElementById(id);
 const status = message => { element('status').textContent = message; };
 const formatTime = ms => `${Math.floor(ms / 60000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, '0')}`;
 let authenticated = false;
 let sdkPromise;
+let panelBridge;
+let integrated = false;
+let background = false;
+let stopped = false;
 
 async function api(path, body) {
     const response = await fetch(`/api/${path}`, {
@@ -13,7 +18,11 @@ async function api(path, body) {
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: AbortSignal.timeout(20000),
     });
-    if (!response.ok) throw new Error(`Pulse request failed (${response.status}). Reconnect your account or restart the prototype.`);
+    if (!response.ok) {
+        const error = new Error(`Pulse request failed (${response.status}). Reconnect your account or restart the player.`);
+        error.status = response.status;
+        throw error;
+    }
     return response.json();
 }
 
@@ -81,28 +90,73 @@ for (const button of document.querySelectorAll('[data-command]'))
     button.onclick = () => probe.command(button.dataset.command).catch(() => status('Playback command failed. Reconnect and try again.'));
 element('position').onchange = () => run(() => probe.command('seek', Number(element('position').value)));
 element('volume').onchange = () => run(() => probe.command('setVolume', Number(element('volume').value)));
-window.addEventListener('pagehide', () => probe.disconnect());
+window.addEventListener('pagehide', () => {
+    stopped = true;
+    panelBridge?.stop();
+    probe.disconnect();
+});
+
+async function watchBackgroundAuth() {
+    let nextAttempt = 0;
+    while (!stopped) {
+        try {
+            const state = await api('status');
+            if (stopped) break;
+            const wasAuthenticated = authenticated;
+            authenticated = state.authenticated;
+            if (!authenticated && probe.player) probe.disconnect();
+            if (authenticated && !probe.player && (!wasAuthenticated || Date.now() >= nextAttempt)) {
+                nextAttempt = Date.now() + 30000;
+                await connectPlayer();
+            }
+            if (!authenticated) probe.update({message: 'Connect Spotify from the Pulse panel.'});
+        } catch { probe.update({message: 'Pulse player connection interrupted.'}); }
+        await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+}
 
 run(async () => {
+    const state = await api('status');
+    integrated = state.integrated === true;
+    background = integrated && new URLSearchParams(location.search).get('player') === '1';
+    authenticated = state.authenticated;
+    if (integrated) {
+        document.title = background ? 'Pulse audio process' : 'Connect Pulse';
+        document.querySelector('h1').textContent = 'Connect Pulse';
+        document.querySelector('.eyebrow').textContent = 'PULSE · GNOME';
+        document.querySelector('main > h1 + p').textContent = 'Sign in here, then use Pulse in the GNOME panel. Audio runs in the background.';
+        for (const note of document.querySelectorAll('.note')) note.hidden = true;
+        document.querySelector('[aria-labelledby="player-title"]').hidden = !background;
+        element('runtime').textContent = 'Spotify playback runs in Pulse’s background audio process.';
+        if (background) {
+            panelBridge = new PanelBridge({api, probe});
+            await panelBridge.start();
+        }
+    }
     let supported = false;
-    try {
+    if (!integrated || background) try {
         await navigator.requestMediaKeySystemAccess('com.widevine.alpha', [{
             initDataTypes: ['cenc'], audioCapabilities: [{contentType: 'audio/mp4; codecs="mp4a.40.2"'}],
         }]);
         supported = true;
     } catch { /* Runtime capability check is deliberately independent of login. */ }
-    element('runtime').textContent = supported
+    if (!integrated || background) element('runtime').textContent = supported
         ? 'Protected audio support detected. Real Spotify playback still needs verification.'
         : 'Protected audio unavailable. Open this page in a browser with Widevine enabled.';
-    element('connect').disabled = !supported;
-    const state = await api('status');
-    authenticated = state.authenticated;
+    element('connect').disabled = !supported && (!integrated || background);
     element('client-id').value = state.clientId || '';
     element('login').hidden = authenticated;
     element('logout').hidden = !authenticated;
-    element('reconnect').hidden = !authenticated || !supported;
+    element('reconnect').hidden = integrated || !authenticated || !supported;
     const callbackFailed = location.search.length > 0 && !authenticated;
-    history.replaceState(null, '', '/');
+    if (!background) history.replaceState(null, '', '/');
     status(callbackFailed ? 'Spotify login did not complete. Connect again to retry.' : 'Connect your Spotify account.');
-    if (authenticated && supported) await connectPlayer();
+    if (background) {
+        if (supported) void watchBackgroundAuth();
+        else probe.update({phase: 'error', message: 'Background Chrome cannot initialize protected audio. Check Widevine support.'});
+    } else if (integrated) {
+        element('runtime').textContent = authenticated
+            ? 'Spotify is connected. You can close this window and use the GNOME panel.'
+            : 'Connect your account to enable playback from the GNOME panel.';
+    } else if (authenticated && supported) await connectPlayer();
 });

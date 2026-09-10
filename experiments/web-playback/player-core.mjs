@@ -11,6 +11,12 @@ export function trackUri(value) {
     throw new Error('Enter a Spotify track link or spotify:track URI.');
 }
 
+export function playbackBody(value) {
+    if (typeof value === 'string' && /^spotify:(album|playlist|artist):[A-Za-z0-9]{22}$/.test(value))
+        return {context_uri: value};
+    return {uris: [trackUri(value)]};
+}
+
 export class PlaybackProbe {
     constructor({createPlayer, getToken, fetchImpl = (...args) => globalThis.fetch(...args),
         onChange = () => {}, connectionTimeoutMs = 15000}) {
@@ -55,14 +61,7 @@ export class PlaybackProbe {
             this.disconnect();
             this.update({phase: 'offline', message: 'Player offline. Check your connection, then reconnect.'});
         });
-        listen('player_state_changed', state => {
-            if (!state) {
-                this.update({track: null});
-                return;
-            }
-            this.update({track: state.track_window.current_track, paused: state.paused,
-                position: state.position, duration: state.duration});
-        });
+        listen('player_state_changed', state => this.applyState(state));
         for (const [event, message] of Object.entries({
             initialization_error: 'This browser cannot initialize Spotify audio. Check protected-content support.',
             authentication_error: 'Spotify authorization failed. Sign out and connect again.',
@@ -103,11 +102,32 @@ export class PlaybackProbe {
         this.deviceId = null;
         // Retire callbacks first, including callbacks emitted by disconnect().
         try { old?.disconnect(); } catch { /* Already disconnected. */ }
-        this.update({phase: 'idle', track: null, position: 0, duration: 0});
+        this.update({phase: 'idle', track: null, paused: true, position: 0, duration: 0});
+    }
+
+    applyState(state) {
+        if (!state) {
+            this.update({track: null, paused: true, position: 0, duration: 0});
+            return;
+        }
+        this.update({track: state.track_window.current_track, paused: state.paused,
+            position: state.position, duration: state.duration, disallows: state.disallows || {}});
+    }
+
+    async sampleState() {
+        if (!this.player?.getCurrentState) return;
+        const generation = this.generation;
+        let timer;
+        try {
+            const state = await Promise.race([this.player.getCurrentState(), new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error('State request timed out.')), 2000);
+            })]);
+            if (generation === this.generation) this.applyState(state);
+        } finally { clearTimeout(timer); }
     }
 
     async play(input) {
-        const uri = trackUri(input);
+        const body = playbackBody(input);
         if (!this.deviceId || !this.player) throw new Error('Wait for the player to be ready.');
         const generation = this.generation;
         const deviceId = this.deviceId;
@@ -120,7 +140,7 @@ export class PlaybackProbe {
             `https://api.spotify.com/v1/me/player/play?device_id=${encodeURIComponent(deviceId)}`, {
                 method: 'PUT', signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15000)]),
                 headers: {Authorization: `Bearer ${token}`, 'Content-Type': 'application/json'},
-                body: JSON.stringify({uris: [uri]}),
+                body: JSON.stringify(body),
             });
         if (generation !== this.generation) return;
         if (!response.ok) {

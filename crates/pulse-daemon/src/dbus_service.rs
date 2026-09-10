@@ -9,11 +9,12 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, Semaphore};
 use zbus::object_server::SignalEmitter;
 
+use crate::browser_player::{BrowserAuthState, BrowserPlayer};
 use crate::cache::{ArtworkCache, CacheRepository, CachedResponse, unix_now};
 use crate::error::{PulseError, Result};
 use crate::model::{HealthSnapshot, HealthStatus, PlaybackSnapshot};
 use crate::mpris::MprisClient;
-use crate::spotify::{RefreshTokenStore, SpotifyClient};
+use crate::spotify::{RefreshTokenStore, SpotifyClient, TokenSet};
 
 pub const BUS_NAME: &str = "io.kanterlabs.Pulse";
 pub const OBJECT_PATH: &str = "/io/kanterlabs/Pulse";
@@ -40,6 +41,7 @@ pub struct DaemonState {
     health: Arc<RwLock<HealthSnapshot>>,
     active_view: Arc<RwLock<String>>,
     mpris: Option<MprisClient>,
+    browser_player: Option<BrowserPlayer>,
     spotify: Option<SpotifyClient>,
     cache: Option<Arc<CacheRepository>>,
     artwork: Option<ArtworkCache>,
@@ -48,6 +50,11 @@ pub struct DaemonState {
     refresh_store: Option<Arc<dyn RefreshTokenStore>>,
     login: Arc<Mutex<Option<PendingLogin>>>,
     login_generation: Arc<AtomicU64>,
+    browser_auth: Arc<RwLock<Option<BrowserAuthState>>>,
+    browser_session_fingerprint: Arc<RwLock<Option<[u8; 32]>>>,
+    browser_session_generation: Arc<AtomicU64>,
+    browser_sync: Arc<Mutex<()>>,
+    player_setup_url: Arc<RwLock<Option<String>>>,
     snapshot_ttl_seconds: u64,
     api_ttl_seconds: u64,
 }
@@ -60,6 +67,7 @@ impl std::fmt::Debug for DaemonState {
             .field("health", &self.health())
             .field("active_view", &self.active_view())
             .field("has_mpris", &self.mpris.is_some())
+            .field("has_browser_player", &self.browser_player.is_some())
             .field("has_spotify", &self.spotify.is_some())
             .field("has_cache", &self.cache.is_some())
             .field("has_artwork_cache", &self.artwork.is_some())
@@ -103,6 +111,7 @@ impl DaemonState {
             health: Arc::new(RwLock::new(health)),
             active_view: Arc::new(RwLock::new("home".into())),
             mpris,
+            browser_player: None,
             spotify,
             cache,
             artwork: None,
@@ -111,6 +120,11 @@ impl DaemonState {
             refresh_store: None,
             login: Arc::new(Mutex::new(None)),
             login_generation: Arc::new(AtomicU64::new(0)),
+            browser_auth: Arc::new(RwLock::new(None)),
+            browser_session_fingerprint: Arc::new(RwLock::new(None)),
+            browser_session_generation: Arc::new(AtomicU64::new(0)),
+            browser_sync: Arc::new(Mutex::new(())),
+            player_setup_url: Arc::new(RwLock::new(None)),
             snapshot_ttl_seconds: 30,
             api_ttl_seconds: DEFAULT_API_TTL_SECONDS,
         }
@@ -119,6 +133,12 @@ impl DaemonState {
     #[must_use]
     pub fn with_refresh_store(mut self, store: Arc<dyn RefreshTokenStore>) -> Self {
         self.refresh_store = Some(store);
+        self
+    }
+
+    #[must_use]
+    pub fn with_browser_player(mut self, browser_player: BrowserPlayer) -> Self {
+        self.browser_player = Some(browser_player);
         self
     }
 
@@ -158,10 +178,17 @@ impl DaemonState {
         // The token is restored after DaemonState construction during startup, and can also be
         // refreshed lazily before an API request. Derive this field from the client so Health and
         // GetAuthState cannot disagree about the current authentication state.
-        health.spotify_authenticated = self
-            .spotify
-            .as_ref()
-            .is_some_and(SpotifyClient::is_authenticated);
+        health.spotify_authenticated = if self.browser_player.is_some() {
+            self.browser_auth
+                .read()
+                .ok()
+                .and_then(|auth| auth.as_ref().copied())
+                .is_some_and(|auth| auth.authenticated)
+        } else {
+            self.spotify
+                .as_ref()
+                .is_some_and(SpotifyClient::is_authenticated)
+        };
         health
     }
 
@@ -185,7 +212,22 @@ impl DaemonState {
     }
 
     pub async fn refresh(&self) -> Result<PlaybackSnapshot> {
-        let mut snapshot = if let Some(mpris) = &self.mpris {
+        let browser_sync_error = if self.browser_player.is_some() {
+            self.ensure_browser_session().await.err()
+        } else {
+            None
+        };
+        let mut snapshot = if let Some(browser_player) = &self.browser_player {
+            match browser_player.snapshot().await {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    let mut snapshot = self.snapshot();
+                    snapshot.offline = true;
+                    snapshot.error = Some(error.to_string());
+                    snapshot
+                }
+            }
+        } else if let Some(mpris) = &self.mpris {
             match mpris.snapshot().await {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
@@ -202,6 +244,12 @@ impl DaemonState {
             snapshot.offline = true;
             snapshot
         };
+        if let Some(error) = browser_sync_error
+            && snapshot.error.is_none()
+        {
+            snapshot.error = Some(error.to_string());
+            snapshot.offline = true;
+        }
         if matches!(snapshot.status, crate::model::PlaybackStatus::Disconnected) {
             let mut previous = self.snapshot();
             previous.status = crate::model::PlaybackStatus::Disconnected;
@@ -226,6 +274,10 @@ impl DaemonState {
     }
 
     pub async fn play_pause(&self) -> Result<PlaybackSnapshot> {
+        if let Some(browser_player) = &self.browser_player {
+            browser_player.play_pause().await?;
+            return self.refresh().await;
+        }
         let mpris = self
             .mpris
             .as_ref()
@@ -235,6 +287,10 @@ impl DaemonState {
     }
 
     pub async fn next(&self) -> Result<PlaybackSnapshot> {
+        if let Some(browser_player) = &self.browser_player {
+            browser_player.next().await?;
+            return self.refresh().await;
+        }
         let mpris = self
             .mpris
             .as_ref()
@@ -244,6 +300,10 @@ impl DaemonState {
     }
 
     pub async fn previous(&self) -> Result<PlaybackSnapshot> {
+        if let Some(browser_player) = &self.browser_player {
+            browser_player.previous().await?;
+            return self.refresh().await;
+        }
         let mpris = self
             .mpris
             .as_ref()
@@ -253,6 +313,10 @@ impl DaemonState {
     }
 
     pub async fn seek(&self, position_us: i64) -> Result<PlaybackSnapshot> {
+        if let Some(browser_player) = &self.browser_player {
+            browser_player.seek(position_us).await?;
+            return self.refresh().await;
+        }
         let mpris = self
             .mpris
             .as_ref()
@@ -264,6 +328,9 @@ impl DaemonState {
     pub async fn open_uri(&self, uri: &str) -> Result<()> {
         match route_uri(uri)? {
             UriRoute::Spotify => {
+                if let Some(browser_player) = &self.browser_player {
+                    return browser_player.open_uri(uri).await;
+                }
                 if let Some(mpris) = &self.mpris
                     && mpris.open_uri(uri).await.is_ok()
                 {
@@ -308,6 +375,14 @@ impl DaemonState {
         }
 
         let key = cache_key("search", &[query]);
+        let browser_generation = if self.browser_player.is_some() {
+            if let Err(error) = self.ensure_browser_session().await {
+                return self.stale_or_error(&key, "search", &error);
+            }
+            Some(self.browser_session_generation.load(Ordering::SeqCst))
+        } else {
+            None
+        };
         if let Some(payload) = self.fresh_cached_payload(&key) {
             return self.serialize_payload(&payload);
         }
@@ -329,7 +404,9 @@ impl DaemonState {
                 "Spotify is not configured",
             ));
         };
-        if let Err(error) = self.ensure_spotify_session(spotify).await {
+        if self.browser_player.is_none()
+            && let Err(error) = self.ensure_spotify_session(spotify).await
+        {
             return self.stale_or_error(&key, "search", &error);
         }
         match spotify
@@ -337,6 +414,14 @@ impl DaemonState {
             .await
         {
             Ok(response) => {
+                if browser_generation.is_some_and(|generation| {
+                    generation != self.browser_session_generation.load(Ordering::SeqCst)
+                }) {
+                    return self.serialize_payload(&error_payload(
+                        "search",
+                        &PulseError::AuthenticationRequired,
+                    ));
+                }
                 let payload = self.normalize_search(response).await;
                 self.cache_and_serialize(&key, "https://api.spotify.com/v1/search", &payload)
             }
@@ -352,6 +437,14 @@ impl DaemonState {
         self.set_active_view(view)?;
         let offset_text = offset.to_string();
         let key = cache_key(&format!("view:{view}"), &[offset_text.as_str()]);
+        let browser_generation = if self.browser_player.is_some() {
+            if let Err(error) = self.ensure_browser_session().await {
+                return self.stale_or_error(&key, view, &error);
+            }
+            Some(self.browser_session_generation.load(Ordering::SeqCst))
+        } else {
+            None
+        };
         if let Some(payload) = self.fresh_cached_payload(&key) {
             return self.serialize_payload(&payload);
         }
@@ -373,7 +466,9 @@ impl DaemonState {
                 "Spotify is not configured",
             ));
         };
-        if let Err(error) = self.ensure_spotify_session(spotify).await {
+        if self.browser_player.is_none()
+            && let Err(error) = self.ensure_spotify_session(spotify).await
+        {
             return self.stale_or_error(&key, view, &error);
         }
 
@@ -385,6 +480,14 @@ impl DaemonState {
         };
         match result {
             Ok(payload) => {
+                if browser_generation.is_some_and(|generation| {
+                    generation != self.browser_session_generation.load(Ordering::SeqCst)
+                }) {
+                    return self.serialize_payload(&error_payload(
+                        view,
+                        &PulseError::AuthenticationRequired,
+                    ));
+                }
                 let source_url = format!("https://api.spotify.com/v1/me/{view}");
                 self.cache_and_serialize(&key, &source_url, &payload)
             }
@@ -395,6 +498,9 @@ impl DaemonState {
     /// Return authentication state without exposing access or refresh tokens.
     #[must_use]
     pub fn auth_state_json(&self) -> String {
+        if self.browser_player.is_some() {
+            return self.browser_auth_state_json();
+        }
         let configured = self.spotify.is_some();
         let authenticated = self
             .spotify
@@ -416,6 +522,53 @@ impl DaemonState {
             "error": error,
         })
         .to_string()
+    }
+
+    async fn auth_state_json_for_dbus(&self) -> String {
+        if self.browser_player.is_some()
+            && let Err(error) = self.refresh_browser_auth().await
+        {
+            self.set_browser_error(&error);
+        }
+        self.auth_state_json()
+    }
+
+    fn browser_auth_state_json(&self) -> String {
+        let auth = self.browser_auth.read().ok().and_then(|auth| *auth);
+        let authenticated = auth.is_some_and(|auth| auth.authenticated);
+        let state = if auth.is_none() {
+            "player_unavailable"
+        } else if authenticated {
+            "authenticated"
+        } else {
+            "logged_out"
+        };
+        let error = if auth.is_none() {
+            Some("Start the Pulse player helper to connect Spotify.".to_owned())
+        } else {
+            self.health().error
+        };
+        let mut payload = json!({
+            // Browser setup owns the real Spotify client ID. The extension should still expose
+            // its Connect action so the helper setup page can collect it when needed.
+            "client_id_configured": true,
+            "configured": true,
+            "authenticated": authenticated,
+            "state": state,
+            "capability": state,
+            "playback_backend": "browser",
+            "actual_configured": auth.map(|value| value.configured),
+            "error": error,
+        });
+        if let Some(url) = self
+            .player_setup_url
+            .read()
+            .ok()
+            .and_then(|url| url.clone())
+        {
+            payload["player_setup_url"] = Value::String(url);
+        }
+        payload.to_string()
     }
 
     async fn home_payload(&self, spotify: &SpotifyClient, offset: usize) -> Result<Value> {
@@ -749,7 +902,153 @@ impl DaemonState {
         self.serialize_payload(&error_payload(name, error))
     }
 
+    async fn refresh_browser_auth(&self) -> Result<BrowserAuthState> {
+        let _guard = self.browser_sync.lock().await;
+        self.refresh_browser_auth_inner().await
+    }
+
+    async fn refresh_browser_auth_inner(&self) -> Result<BrowserAuthState> {
+        let browser_player = self
+            .browser_player
+            .as_ref()
+            .ok_or_else(|| PulseError::NotFound("browser player is not configured".into()))?;
+        match browser_player.auth_state().await {
+            Ok(auth) => {
+                self.browser_auth
+                    .write()
+                    .map(|mut current| *current = Some(auth))
+                    .map_err(|_| {
+                        PulseError::CacheUnavailable("browser auth lock poisoned".into())
+                    })?;
+                if !auth.authenticated {
+                    self.clear_browser_credentials_keep_auth()?;
+                    if let Ok(mut health) = self.health.write() {
+                        health.error = None;
+                    }
+                } else if let Ok(mut health) = self.health.write() {
+                    health.error = None;
+                }
+                Ok(auth)
+            }
+            Err(error) => {
+                self.clear_browser_session_cache()?;
+                Err(error)
+            }
+        }
+    }
+
+    async fn ensure_browser_session(&self) -> Result<()> {
+        let _guard = self.browser_sync.lock().await;
+        let login_generation = self.login_generation.load(Ordering::SeqCst);
+        let auth = self.refresh_browser_auth_inner().await?;
+        if !auth.authenticated {
+            return Err(PulseError::AuthenticationRequired);
+        }
+        let browser_player = self
+            .browser_player
+            .as_ref()
+            .ok_or_else(|| PulseError::NotFound("browser player is not configured".into()))?;
+        let token = browser_player.token().await.inspect_err(|_| {
+            let _ = self.clear_browser_session_cache();
+        })?;
+        if self.login_generation.load(Ordering::SeqCst) != login_generation {
+            let _ = self.clear_browser_session_cache();
+            return Err(PulseError::AuthenticationRequired);
+        }
+        if token.access_token.trim().is_empty() || token.expires_in == 0 {
+            self.clear_browser_session_cache()?;
+            return Err(PulseError::AuthenticationFailed(
+                "browser player returned an invalid access token".into(),
+            ));
+        }
+        let spotify = self
+            .spotify
+            .as_ref()
+            .ok_or_else(|| PulseError::NotFound("Spotify API client is not configured".into()))?;
+        let fingerprint: [u8; 32] = Sha256::digest(token.access_token.as_bytes()).into();
+        let changed = self
+            .browser_session_fingerprint
+            .read()
+            .map_or(true, |current| current.as_ref() != Some(&fingerprint));
+        if changed {
+            if let Some(cache) = &self.cache {
+                cache.clear_spotify_cache()?;
+            }
+            self.browser_session_fingerprint
+                .write()
+                .map(|mut current| *current = Some(fingerprint))
+                .map_err(|_| {
+                    PulseError::CacheUnavailable("browser session lock poisoned".into())
+                })?;
+            self.browser_session_generation
+                .fetch_add(1, Ordering::SeqCst);
+        }
+        // The helper owns refresh persistence. The daemon receives only this short-lived access
+        // token and deliberately creates no refresh-token-backed store in browser mode.
+        spotify.set_token(TokenSet::new(
+            token.access_token,
+            "Bearer",
+            None,
+            token.expires_in,
+        ))?;
+        if let Ok(mut health) = self.health.write() {
+            health.spotify_authenticated = true;
+            health.error = None;
+        }
+        Ok(())
+    }
+
+    fn clear_browser_session_cache(&self) -> Result<()> {
+        self.clear_browser_api_cache()?;
+        if let Ok(mut auth) = self.browser_auth.write() {
+            *auth = None;
+        }
+        if let Ok(mut fingerprint) = self.browser_session_fingerprint.write() {
+            *fingerprint = None;
+        }
+        self.browser_session_generation
+            .fetch_add(1, Ordering::SeqCst);
+        if let Ok(mut health) = self.health.write() {
+            health.spotify_authenticated = false;
+        }
+        Ok(())
+    }
+
+    fn clear_browser_credentials_keep_auth(&self) -> Result<()> {
+        self.clear_browser_api_cache()?;
+        if let Ok(mut fingerprint) = self.browser_session_fingerprint.write() {
+            *fingerprint = None;
+        }
+        self.browser_session_generation
+            .fetch_add(1, Ordering::SeqCst);
+        if let Ok(mut health) = self.health.write() {
+            health.spotify_authenticated = false;
+        }
+        Ok(())
+    }
+
+    fn clear_browser_api_cache(&self) -> Result<()> {
+        if let Some(spotify) = &self.spotify {
+            spotify.clear_token()?;
+        }
+        if let Some(cache) = &self.cache {
+            cache.clear_spotify_cache()?;
+        }
+        Ok(())
+    }
+
+    fn set_browser_error(&self, error: &PulseError) {
+        if let Ok(mut health) = self.health.write() {
+            health.error = Some(error.to_string());
+            health.status = HealthStatus::Degraded;
+            health.spotify_authenticated = false;
+        }
+    }
+
     async fn ensure_spotify_session(&self, spotify: &SpotifyClient) -> Result<()> {
+        if self.browser_player.is_some() {
+            return self.ensure_browser_session().await;
+        }
         if spotify.is_authenticated() {
             return Ok(());
         }
@@ -795,6 +1094,16 @@ impl DaemonState {
     }
 
     pub async fn begin_login(self: &Arc<Self>) -> Result<String> {
+        if let Some(browser_player) = &self.browser_player {
+            let _guard = self.browser_sync.lock().await;
+            self.login_generation.fetch_add(1, Ordering::SeqCst);
+            let authorization_url = browser_player.begin_login().await?;
+            self.player_setup_url
+                .write()
+                .map(|mut current| *current = Some(authorization_url.clone()))
+                .map_err(|_| PulseError::CacheUnavailable("setup URL lock poisoned".into()))?;
+            return Ok(authorization_url);
+        }
         let spotify = self
             .spotify
             .as_ref()
@@ -888,9 +1197,46 @@ impl DaemonState {
         if let Ok(mut health) = self.health.write() {
             health.spotify_authenticated = false;
         }
+        if let Ok(mut auth) = self.browser_auth.write() {
+            *auth = None;
+        }
+        if let Ok(mut fingerprint) = self.browser_session_fingerprint.write() {
+            *fingerprint = None;
+        }
+        self.browser_session_generation
+            .fetch_add(1, Ordering::SeqCst);
+        if let Ok(mut setup_url) = self.player_setup_url.write() {
+            *setup_url = None;
+        }
         self.refresh_store
             .as_ref()
             .map_or(Ok(()), |store| store.clear())
+    }
+
+    /// Retire local auth/cache state, then require the helper to clear its player session and
+    /// persistent refresh token when browser mode is active.
+    pub async fn logout_with_backend(&self) -> Result<()> {
+        // Serialize with helper-token import. Whichever operation wins is
+        // completed first; logout always clears a token imported just before it.
+        let _guard = self.browser_sync.lock().await;
+        let local_result = self.logout();
+        let helper_result = if let Some(browser_player) = &self.browser_player {
+            browser_player.logout().await
+        } else {
+            Ok(())
+        };
+        local_result?;
+        if let Err(error) = helper_result {
+            if let Ok(mut health) = self.health.write() {
+                health.error = Some(error.to_string());
+                health.status = HealthStatus::Degraded;
+            }
+            // The helper owns the persistent refresh token. Reporting success while it is
+            // unreachable (or while Secret Service deletion failed) would let a service restart
+            // silently restore the account the user just logged out of.
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn set_snapshot(&self, snapshot: PlaybackSnapshot) -> Result<()> {
@@ -1303,8 +1649,8 @@ impl PulseDbus {
     }
 
     #[zbus(out_args("auth_state_json"))]
-    fn get_auth_state(&self) -> String {
-        self.state.auth_state_json()
+    async fn get_auth_state(&self) -> String {
+        self.state.auth_state_json_for_dbus().await
     }
 
     async fn open_uri(&self, uri: String) -> zbus::fdo::Result<()> {
@@ -1357,7 +1703,10 @@ impl PulseDbus {
         &self,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> zbus::fdo::Result<()> {
-        self.state.logout().map_err(to_dbus_error)?;
+        self.state
+            .logout_with_backend()
+            .await
+            .map_err(to_dbus_error)?;
         Self::login_state_changed(&emitter, false)
             .await
             .map_err(to_dbus_zbus_error)
@@ -1434,6 +1783,7 @@ fn to_dbus_zbus_error(error: zbus::Error) -> zbus::fdo::Error {
 #[cfg(test)]
 mod tests {
     use super::{DaemonState, INTERFACE, OBJECT_PATH, PulseDbus};
+    use crate::browser_player::BrowserPlayer;
     use crate::cache::{CacheLimits, CacheRepository};
     use crate::model::PlaybackStatus;
     use crate::spotify::{RetryPolicy, SpotifyClient, TokenSet};
@@ -1473,6 +1823,21 @@ mod tests {
 
         assert!(state.health().spotify_authenticated);
         spotify.clear_token().unwrap();
+        assert!(!state.health().spotify_authenticated);
+    }
+
+    #[tokio::test]
+    async fn browser_logout_reports_missing_helper_after_retiring_local_token() {
+        let spotify = SpotifyClient::new("test-client").unwrap();
+        spotify
+            .set_token(TokenSet::new("access-token", "Bearer", None, 3_600))
+            .unwrap();
+        let runtime = tempdir().unwrap();
+        let player = BrowserPlayer::new_with_runtime_dir(runtime.path()).unwrap();
+        let state = DaemonState::new(None, Some(spotify.clone()), None).with_browser_player(player);
+
+        assert!(state.logout_with_backend().await.is_err());
+        assert!(!spotify.is_authenticated());
         assert!(!state.health().spotify_authenticated);
     }
 

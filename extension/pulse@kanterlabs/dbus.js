@@ -421,6 +421,7 @@ function normalizeAuthState(raw, fallbackError = '') {
     return {
         authenticated,
         client_id_configured: configured,
+        playback_backend: value.playback_backend === 'browser' ? 'browser' : 'mpris',
         state,
         error: firstString(value.error, fallbackError),
     };
