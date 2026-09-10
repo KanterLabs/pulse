@@ -1,0 +1,22 @@
+[Unit]
+Description=Pulse background Spotify audio player
+After=graphical-session.target
+PartOf=graphical-session.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart="@PULSE_EXEC@"
+Environment=PULSE_PLAYER_INTEGRATION=1
+Environment="XDG_CONFIG_HOME=@XDG_CONFIG_HOME@"
+Environment="XDG_DATA_HOME=@XDG_DATA_HOME@"
+Environment="XDG_CACHE_HOME=@XDG_CACHE_HOME@"
+UMask=0077
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=10s
+KillMode=control-group
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,8 +1,8 @@
 # Pulse
 
-Pulse is a Fedora GNOME desktop companion for the official Spotify desktop
-client. It puts a small, fast command center in the panel while leaving audio
-playback in Spotify itself.
+Pulse is a Fedora GNOME music extension for Spotify. It puts the player in the
+GNOME panel and can play through a separate headless Google Chrome process, so
+the Spotify desktop app and a visible browser player are not required.
 
 [![CI](https://github.com/KanterLabs/pulse/actions/workflows/ci.yml/badge.svg)](https://github.com/KanterLabs/pulse/actions/workflows/ci.yml)
 
@@ -26,14 +26,14 @@ Pulse is a native per-user application made of two cooperating pieces:
 - a GNOME Shell extension for the panel indicator, popover, keyboard actions,
   and presentation; and
 - a Rust daemon for the session-bus API, Spotify Web API access, local cache,
-  secrets, and playback control through MPRIS.
+  secrets, and playback routing; and
+- an optional user service running Spotify's Web Playback SDK in headless
+  Google Chrome for independent audio.
 
-The installed extension currently uses the official Spotify application as
-its playback engine. Independent playback is being developed in a separate
-[browser prototype](experiments/web-playback/README.md), following the
-[staged implementation plan](docs/INDEPENDENT_PLAYBACK_PLAN.md). The prototype
-has login and playback controls, but real-account audio and a background
-runtime must pass validation before replacing the production backend.
+The independent player is opt-in while laptop recovery and sustained audio are
+validated. The original MPRIS backend remains available. Account setup opens a
+normal browser window once for Spotify sign-in; daily playback has no visible
+browser window.
 
 ## Feature status
 
@@ -43,8 +43,8 @@ Fedora-laptop validation item until the first alpha release.
 
 | Area | Target | Status in this pre-alpha tree |
 | --- | --- | --- |
-| Panel mini-player | Play/pause, next, previous, current playback, and Open in Spotify | Implemented |
-| Local playback | MPRIS control of the official Spotify desktop client | Implemented |
+| Panel mini-player | Play/pause, next, previous, seek, current playback, and direct selection | Implemented |
+| Playback | Optional headless Chrome player; MPRIS backend retained | Experimental |
 | Account data | PKCE login, recently played, saved items, and the user's playlists | Implemented |
 | Search and queue | Debounced search, paginated views, and a read-only queue | Implemented |
 | Offline behavior | Cached snapshots with bounded artwork and stale fallback | Implemented |
@@ -64,7 +64,10 @@ GNOME Shell process
              v
 systemd --user
   pulse-daemon
-    MPRIS + Spotify Web API + SQLite cache + Secret Service
+    Spotify Web API + SQLite cache
+      | MPRIS, or restricted loopback bridge
+  pulse-player
+    headless Google Chrome + Web Playback SDK + Secret Service
 ```
 
 The boundary is deliberately narrow: the extension must stay responsive and
@@ -97,8 +100,11 @@ Install or verify these before building:
 - GNOME Shell, GJS, `gnome-extensions`, a user `systemd`, and a session D-Bus;
 - GNOME Keyring (Secret Service) for OAuth refresh-token storage;
 - Bash and Python 3 for repository diagnostics; and
-- the official Spotify desktop client, installed through Flatpak or RPM/native
-  packaging, with MPRIS visible after Spotify starts.
+- for independent playback, Node.js 22 or newer, `secret-tool`, Google Chrome,
+  Spotify Premium, and a Spotify developer app with Web Playback SDK enabled.
+
+The original backend instead uses the official Spotify desktop client through
+MPRIS.
 
 Development checks use Node.js for lifecycle regressions, Python 3 for
 installer tests, `shellcheck` for shell scripts, and `glib-compile-schemas`
@@ -131,6 +137,19 @@ cd /path/to/pulse
 ./scripts/build.sh
 ./scripts/install-user.sh
 ```
+
+To install the GNOME extension with the independent player, use:
+
+```bash
+./scripts/install-user.sh --independent-playback
+```
+
+This installs and starts `pulse-player.service` alongside the daemon. The
+option is remembered on later ordinary upgrades. After logging out and back in,
+enable Pulse, choose **Connect Spotify**, and finish sign-in in the browser
+window. Close that setup window afterward; audio continues in headless Chrome.
+The Spotify developer app must register
+`http://127.0.0.1:8888/callback` exactly.
 
 The installer is per-user and refuses to run as root. It stages artifacts and
 installs them under XDG locations, including:
@@ -324,9 +343,9 @@ Common causes:
   errors indicate a closed D-Bus connection. Restart `pulse-daemon.service`
   once and install the recovery fix. See the
   [connection recovery checks](docs/TROUBLESHOOTING.md#panel-asks-to-start-the-daemon-while-the-service-is-running).
-- **Spotify is not controllable:** start Spotify first, then verify that an
-  MPRIS player appears with `busctl --user tree`; Flatpak and native Spotify
-  builds can expose different player names.
+- **Spotify is not controllable:** with independent playback, inspect both
+  `pulse-player.service` and `pulse-daemon.service`; with the original backend,
+  start Spotify and verify that an MPRIS player appears with `busctl --user tree`.
 - **Login returns to Pulse without an account:** verify the Dashboard redirect
   URI is an exact match, use the literal `127.0.0.1` address, ensure GNOME
   Keyring's Secret Service is running, and remove no tokens manually until the

@@ -205,6 +205,20 @@ jobs:
       - name: Build workspace
         run: cargo build --workspace
 
+  player-integration:
+    name: Headless player and daemon integration
+    runs-on: homelab-heavy
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Build isolated browser test environment
+        run: docker build -f tests/player-integration/Dockerfile -t pulse-player-integration .
+      - name: Exercise private D-Bus and headless playback
+        run: docker run --rm --network=none --cpus=2 --memory=4g --pids-limit=512 -v "$PWD:/workspace:ro" pulse-player-integration
+
   rust-test:
     name: Rust workspace tests
     runs-on: homelab-heavy

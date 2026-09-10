@@ -2,8 +2,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pulse_daemon::{
-    ArtworkCache, CacheLimits, CacheRepository, DaemonState, MprisClient, PulseConfig,
-    RefreshTokenStore, SecretServiceStore, SpotifyClient, XdgPaths, emit_snapshot_update, serve,
+    ArtworkCache, BrowserPlayer, CacheLimits, CacheRepository, DaemonState, MprisClient,
+    PulseConfig, RefreshTokenStore, SecretServiceStore, SpotifyClient, XdgPaths,
+    emit_snapshot_update, serve,
 };
 
 #[tokio::main]
@@ -24,31 +25,60 @@ async fn main() -> pulse_daemon::Result<()> {
         config.cache.max_artwork_bytes,
         config.cache.max_artwork_disk_bytes,
     )?;
-    let mpris = match MprisClient::connect().await {
-        Ok(client) => Some(client),
-        Err(error) => {
-            eprintln!("MPRIS unavailable; starting disconnected: {error}");
-            None
+    let browser_mode = std::env::var("PULSE_PLAYBACK_BACKEND")
+        .is_ok_and(|backend| backend.eq_ignore_ascii_case("browser"));
+    let mpris = if browser_mode {
+        None
+    } else {
+        match MprisClient::connect().await {
+            Ok(client) => Some(client),
+            Err(error) => {
+                eprintln!("MPRIS unavailable; starting disconnected: {error}");
+                None
+            }
         }
     };
-    let spotify = config
-        .client_id()
-        .map(|client_id| {
+    let spotify = if browser_mode {
+        // Browser OAuth and refresh persistence belong to the helper. This public-looking value
+        // exists only so the daemon can address Spotify's Web API after receiving a short-lived
+        // helper token; it is never sent to an OAuth endpoint.
+        Some(
             SpotifyClient::with_urls(
-                client_id,
+                "00000000000000000000000000000000",
                 &config.spotify.api_base_url,
                 &config.spotify.accounts_base_url,
                 config.spotify.scopes.clone(),
-            )
-            .map(|client| client.with_redirect_port(config.spotify.redirect_port))
+            )?
+            .with_redirect_port(config.spotify.redirect_port),
+        )
+    } else {
+        config
+            .client_id()
+            .map(|client_id| {
+                SpotifyClient::with_urls(
+                    client_id,
+                    &config.spotify.api_base_url,
+                    &config.spotify.accounts_base_url,
+                    config.spotify.scopes.clone(),
+                )
+                .map(|client| client.with_redirect_port(config.spotify.redirect_port))
+            })
+            .transpose()?
+    };
+    let refresh_store = if browser_mode {
+        None
+    } else {
+        config.client_id().map(|client_id| {
+            Arc::new(SecretServiceStore::new(client_id)) as Arc<dyn RefreshTokenStore>
         })
-        .transpose()?;
-    let refresh_store = config.client_id().map(|client_id| {
-        Arc::new(SecretServiceStore::new(client_id)) as Arc<dyn RefreshTokenStore>
-    });
+    };
+    let browser_player = browser_mode.then_some(BrowserPlayer::new()).transpose()?;
     let mut daemon_state = DaemonState::new(mpris, spotify.clone(), Some(cache))
         .with_artwork_cache(artwork_cache)
         .with_api_ttl_seconds(config.cache.api_ttl_seconds);
+    if let Some(browser_player) = browser_player {
+        daemon_state = daemon_state.with_browser_player(browser_player);
+    }
     if let Some(store) = refresh_store.clone() {
         daemon_state = daemon_state.with_refresh_store(store);
     }

@@ -81,12 +81,15 @@ function itemUri(item) {
     return displayText(item.uri, displayText(item.spotify_url));
 }
 
-function safeAuthorizationUri(value) {
-    // The daemon's PKCE authorization endpoint is HTTPS. Restricting this to
-    // HTTPS avoids turning a login response into an arbitrary local launch.
-    return typeof value === 'string' && /^https:\/\//i.test(value.trim())
-        ? value.trim()
-        : '';
+function safeAuthorizationUri(value, browserBackend = false) {
+    if (typeof value !== 'string')
+        return '';
+    const uri = value.trim();
+    if (/^https:\/\//i.test(uri))
+        return uri;
+    // Only the private helper's exact loopback setup root is allowed over HTTP.
+    const match = browserBackend && /^http:\/\/127\.0\.0\.1:([0-9]{1,5})\/$/.exec(uri);
+    return match && Number(match[1]) > 0 && Number(match[1]) <= 65535 ? uri : '';
 }
 
 const PulseIndicator = GObject.registerClass(
@@ -505,6 +508,7 @@ class PulseIndicator extends PanelMenu.Button {
         }));
         this._signalIds.push(this._connection.connect('auth-state-changed', (_connection, raw) => {
             this._authState = parseAuthState(raw);
+            this._renderSnapshot();
             this._renderAuthState();
         }));
         this._signalIds.push(this._connection.connect('search-results', (_connection, result) => {
@@ -558,10 +562,15 @@ class PulseIndicator extends PanelMenu.Button {
 
     _renderSnapshot() {
         const snapshot = this._snapshot;
+        const browserBackend = this._authState?.playback_backend === 'browser';
         const offline = Boolean(snapshot.offline) || !this._connection.connected;
         const hasTrack = Boolean(snapshot.title || snapshot.artist);
-        const title = displayText(snapshot.title, offline ? 'Spotify is unavailable' : 'Nothing playing');
-        const artist = displayText(snapshot.artist, offline ? 'Start Spotify to connect Pulse' : 'Choose something to play');
+        const title = displayText(snapshot.title, offline
+            ? (browserBackend ? 'Pulse player unavailable' : 'Spotify is unavailable') : 'Nothing playing');
+        const artist = displayText(snapshot.artist, offline
+            ? (browserBackend ? displayText(snapshot.error, 'Connect Spotify to play in Pulse') : 'Start Spotify to connect Pulse')
+            : 'Choose something to play');
+        this._openButton.visible = !browserBackend;
 
         this._statusLabel.text = offline ? 'Not connected' : (snapshot.playing ? 'Now playing' : 'Paused');
         this._titleLabel.text = title;
@@ -923,7 +932,8 @@ class PulseIndicator extends PanelMenu.Button {
     _openAuthorizationUrl() {
         if (this._destroyed || this._launchCancellable)
             return;
-        const uri = safeAuthorizationUri(this._pendingAuthorizationUrl);
+        const uri = safeAuthorizationUri(this._pendingAuthorizationUrl,
+            this._authState?.playback_backend === 'browser');
         if (!uri) {
             this._authStatusLabel.text = 'Pulse returned an invalid sign-in URL.';
             this._authorizationButton.visible = false;
@@ -967,6 +977,7 @@ class PulseIndicator extends PanelMenu.Button {
         const offline = !this._connection.connected;
         const configured = auth.client_id_configured;
         const authenticated = Boolean(auth.authenticated);
+        const browserBackend = auth.playback_backend === 'browser';
         if (authenticated)
             this._stopAuthPolling();
         const authError = displayText(auth.error);
@@ -974,7 +985,9 @@ class PulseIndicator extends PanelMenu.Button {
         if (offline) {
             this._authStatusLabel.text = 'Start the Pulse daemon to connect Spotify.';
         } else if (authenticated) {
-            this._authStatusLabel.text = 'Connected to Spotify.';
+            this._authStatusLabel.text = browserBackend ? 'Spotify connected. Playback runs in Pulse.' : 'Connected to Spotify.';
+        } else if (browserBackend) {
+            this._authStatusLabel.text = authError || 'Connect Spotify to play music from the GNOME panel.';
         } else if (configured === false) {
             this._authStatusLabel.text = 'Add a Spotify client ID to the Pulse daemon config to connect.';
         } else if (configured === true) {
@@ -983,7 +996,7 @@ class PulseIndicator extends PanelMenu.Button {
             this._authStatusLabel.text = authError || 'Spotify connection status is unavailable.';
         }
 
-        const canLogin = !offline && configured === true && !authenticated && !this._loginInProgress;
+        const canLogin = !offline && (configured === true || browserBackend) && !authenticated && !this._loginInProgress;
         this._loginButton.visible = canLogin;
         this._loginButton.reactive = canLogin;
         this._loginButton.can_focus = canLogin;

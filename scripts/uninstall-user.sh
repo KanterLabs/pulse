@@ -102,6 +102,10 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 elif pulse_user_systemd_available; then
     systemctl --user disable --now "$(pulse_unit_name)" >/dev/null 2>&1 ||
         pulse_warn 'pulse-daemon.service was not enabled or could not be stopped'
+    if [[ -f "$(pulse_systemd_user_dir)/pulse-player.service" ]]; then
+        systemctl --user disable --now pulse-player.service >/dev/null 2>&1 ||
+            pulse_die 'could not stop the player service; refusing to remove its running code'
+    fi
 else
     pulse_warn 'systemd --user is unavailable; remove any manually started daemon before uninstalling'
 fi
@@ -110,6 +114,9 @@ pulse_remove_file "$BIN_PATH"
 pulse_remove_tree "$EXTENSION_PATH"
 pulse_remove_file "$DBUS_PATH"
 pulse_remove_file "$SYSTEMD_PATH"
+pulse_remove_file "$(pulse_systemd_user_dir)/pulse-player.service"
+pulse_remove_file "$(pulse_systemd_user_dir)/pulse-daemon.service.d/50-pulse-player.conf"
+pulse_remove_tree "$(pulse_data_home)/pulse/player"
 
 pulse_reload_user_integration "$(pulse_config_home)" "$(pulse_data_home)" "$(pulse_cache_home)"
 

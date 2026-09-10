@@ -186,6 +186,7 @@ for cycle in $(seq 1 10); do
     fi
 
     wait_eval 'Main.panel.statusArea["pulse@kanterlabs"]._connection.connected === true && Main.panel.statusArea["pulse@kanterlabs"]._snapshot.title === "Fixture Track" && Main.panel.statusArea["pulse@kanterlabs"]._authState.authenticated === true'
+    wait_eval 'Main.panel.statusArea["pulse@kanterlabs"]._authState.playback_backend === "browser" && Main.panel.statusArea["pulse@kanterlabs"]._openButton.visible === false'
     assert_global_extensions_enabled
     evaluate 'Main.panel.statusArea["pulse@kanterlabs"].menu.open(); true;'
     wait_eval 'Main.panel.statusArea["pulse@kanterlabs"].menu.isOpen === true && Main.panel.statusArea["pulse@kanterlabs"]._viewData.get("home") !== undefined && Main.panel.statusArea["pulse@kanterlabs"]._viewData.get("home").items.length >= 2 && Main.panel.statusArea["pulse@kanterlabs"]._loadMoreButton.visible === false'

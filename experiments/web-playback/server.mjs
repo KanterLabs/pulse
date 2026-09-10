@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
+import { createPlayerBridge, BridgeError } from './bridge.mjs';
 
 const LOOPBACK_HOST = '127.0.0.1';
 const DEFAULT_PORT = 8888;
@@ -12,13 +13,21 @@ const DEFAULT_REFRESH_TIMEOUT_MS = 10 * 1000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 20 * 1000;
 const MAX_BODY_BYTES = 16 * 1024;
 
-const AUTH_SCOPES = [
+const PROTOTYPE_AUTH_SCOPES = [
   'streaming',
   'user-read-email',
   'user-read-private',
   'user-modify-playback-state',
   'user-read-playback-state',
-].join(' ');
+];
+const INTEGRATION_AUTH_SCOPES = [
+  ...PROTOTYPE_AUTH_SCOPES,
+  'user-library-read',
+  'user-read-recently-played',
+  'playlist-read-private',
+  'playlist-read-collaborative',
+  'user-read-currently-playing',
+];
 
 const TOKEN_ENDPOINT = 'https://accounts.spotify.com/api/token';
 const AUTHORIZE_ENDPOINT = 'https://accounts.spotify.com/authorize';
@@ -27,6 +36,7 @@ const STATIC_FILES = new Map([
   ['/index.html', { file: 'index.html', contentType: 'text/html; charset=utf-8' }],
   ['/player.mjs', { file: 'player.mjs', contentType: 'text/javascript; charset=utf-8' }],
   ['/player-core.mjs', { file: 'player-core.mjs', contentType: 'text/javascript; charset=utf-8' }],
+  ['/panel.mjs', { file: 'panel.mjs', contentType: 'text/javascript; charset=utf-8' }],
   ['/style.css', { file: 'style.css', contentType: 'text/css; charset=utf-8' }],
 ]);
 
@@ -135,6 +145,8 @@ function tokenPayload(payload) {
     accessToken: payload.access_token,
     accessExpiresInMs: expiresIn * 1000,
     refreshToken: typeof payload.refresh_token === 'string' ? payload.refresh_token : '',
+    scope: typeof payload.scope === 'string' && payload.scope.trim()
+      ? payload.scope.trim() : '',
   };
 }
 
@@ -261,6 +273,8 @@ export function createProbeServer(options = {}) {
 
   const configuredPort = parsePort(options.port ?? process.env.PULSE_PROBE_PORT, DEFAULT_PORT);
   const staticDir = resolve(options.staticDir ?? dirname(fileURLToPath(import.meta.url)));
+  const integrationEnabled = options.integration === undefined
+    ? process.env.PULSE_PLAYER_INTEGRATION === '1' : options.integration === true;
   const stateTtlMs = cleanNumber(options.stateTtlMs ?? options.pendingStateTtlMs, DEFAULT_STATE_TTL_MS);
   const exchangeTimeoutMs = cleanNumber(options.exchangeTimeoutMs ?? options.oauthTimeoutMs, DEFAULT_EXCHANGE_TIMEOUT_MS);
   const refreshTimeoutMs = cleanNumber(options.refreshTimeoutMs, DEFAULT_REFRESH_TIMEOUT_MS);
@@ -269,13 +283,29 @@ export function createProbeServer(options = {}) {
   const now = typeof options.now === 'function' ? options.now : () => Date.now();
   if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl must be a function');
 
-  const configuredClientId = options.clientId ?? process.env.PULSE_PROBE_CLIENT_ID;
+  const bridge = createPlayerBridge({
+    ...options,
+    enabled: integrationEnabled,
+    now,
+    runtimeDir: options.runtimeDir ?? process.env.XDG_RUNTIME_DIR,
+    auth: () => ({
+      configured: Boolean(auth?.clientId),
+      authenticated: Boolean(auth && (
+        accessTokenStillValid(auth, now()) || Boolean(auth.refreshToken && auth.clientId)
+      )),
+    }),
+  });
+  const configuredClientId = options.clientId ?? process.env.PULSE_PROBE_CLIENT_ID ??
+    (integrationEnabled ? bridge.configuredClientId : '');
+  const initialClientId = validClientId(configuredClientId) ? configuredClientId : '';
   const auth = {
     accessExpiresAt: 0,
     accessToken: '',
-    clientId: validClientId(configuredClientId) ? configuredClientId : '',
+    clientId: initialClientId,
     refreshToken: '',
+    scope: integrationEnabled ? INTEGRATION_AUTH_SCOPES.join(' ') : PROTOTYPE_AUTH_SCOPES.join(' '),
   };
+  if (integrationEnabled) auth.refreshToken = bridge.loadRefreshToken(auth.clientId) || '';
   const pendingStates = new Map();
   const controllers = new Set();
   let generation = 0;
@@ -294,12 +324,24 @@ export function createProbeServer(options = {}) {
     auth.refreshToken = '';
   };
 
-  const invalidate = () => {
+  const invalidate = ({clearPersisted = false, bridgeCode = 'server_restarted'} = {}) => {
+    const hadRefreshToken = Boolean(auth.refreshToken);
+    const previousClientId = auth.clientId;
     generation += 1;
     clearTokens();
     pendingStates.clear();
     for (const controller of controllers) controller.abort();
     refreshPromise = null;
+    if (integrationEnabled) {
+      bridge.reset(bridgeCode);
+      if (clearPersisted) {
+        return bridge.clearRefreshToken(previousClientId).then(result => ({
+          hadRefreshToken,
+          ok: result !== false,
+        }));
+      }
+    }
+    return Promise.resolve({hadRefreshToken, ok: true});
   };
 
   const configuredRedirectUri = (server) =>
@@ -322,10 +364,17 @@ export function createProbeServer(options = {}) {
       return tokenPayload(await readResponseJson(response));
     });
     if (exchangeGeneration !== generation) return false;
+    if (integrationEnabled) {
+      if (!bridge.saveClientId(pending.clientId)) throw new Error('client ID persistence failed');
+      if (payload.refreshToken && !await bridge.saveRefreshToken(pending.clientId, payload.refreshToken))
+        throw new Error('refresh token persistence failed');
+    }
+    if (exchangeGeneration !== generation) return false;
     auth.clientId = pending.clientId;
     auth.accessToken = payload.accessToken;
     auth.accessExpiresAt = now() + payload.accessExpiresInMs;
     auth.refreshToken = payload.refreshToken;
+    if (payload.scope) auth.scope = payload.scope;
     return true;
   };
 
@@ -348,11 +397,17 @@ export function createProbeServer(options = {}) {
         if (!responseIsSuccessful(response)) throw new Error('token refresh failed');
         return tokenPayload(await readResponseJson(response));
       })
-      .then(payload => {
+      .then(async payload => {
+        if (refreshGeneration !== generation) return false;
+        const clientId = auth.clientId;
+        if (integrationEnabled && payload.refreshToken &&
+            !await bridge.saveRefreshToken(clientId, payload.refreshToken))
+          throw new Error('refresh token persistence failed');
         if (refreshGeneration !== generation) return false;
         auth.accessToken = payload.accessToken;
         auth.accessExpiresAt = now() + payload.accessExpiresInMs;
         if (payload.refreshToken) auth.refreshToken = payload.refreshToken;
+        if (payload.scope) auth.scope = payload.scope;
         return true;
       })
       .catch(error => {
@@ -367,6 +422,23 @@ export function createProbeServer(options = {}) {
       () => { if (refreshPromise === promise) refreshPromise = null; },
     );
     return promise;
+  };
+
+  const accessTokenForBridge = async () => {
+    if (accessTokenStillValid(auth, now())) return true;
+    const tokenPromise = refreshAccessToken();
+    if (!tokenPromise) throw new BridgeError('authentication_required', 401);
+    const refreshGeneration = generation;
+    let refreshed;
+    try {
+      refreshed = await tokenPromise;
+    } catch {
+      throw new BridgeError('authentication_required', 401);
+    }
+    if (refreshGeneration !== generation || !refreshed || !accessTokenStillValid(auth, now())) {
+      throw new BridgeError('authentication_required', 401);
+    }
+    return true;
   };
 
   const server = createServer(async (request, response) => {
@@ -386,19 +458,71 @@ export function createProbeServer(options = {}) {
     }
     const pathname = parsedUrl.pathname;
     const isApi = pathname === '/api' || pathname.startsWith('/api/');
+    const isBridge = pathname === '/bridge' || pathname.startsWith('/bridge/');
     if (isApi && !isApiRequestFromProbe(request, server, configuredPort)) {
       sendApiError(response, 403, 'forbidden');
+      return;
+    }
+    if (isBridge && (!integrationEnabled || !bridge.validateRequest(request, serverPort(server, configuredPort)))) {
+      sendApiError(response, 401, 'authentication_required');
       return;
     }
 
     try {
       if (isApi) {
         if (pathname === '/api/status' && request.method === 'GET') {
-          sendJson(response, 200, {
+          const status = {
             authenticated: accessTokenStillValid(auth, now()) ||
               Boolean(auth.refreshToken && auth.clientId),
             clientId: auth.clientId,
-          });
+          };
+          if (integrationEnabled) status.integrated = true;
+          sendJson(response, 200, status);
+          return;
+        }
+
+        if (integrationEnabled && pathname === '/api/player/status' && request.method === 'GET') {
+          sendJson(response, 200, {snapshot: bridge.snapshot()});
+          return;
+        }
+
+        if (integrationEnabled && pathname === '/api/player/register' && request.method === 'POST') {
+          await readRequestBody(request);
+          sendJson(response, 200, {session: bridge.register()});
+          return;
+        }
+
+        if (integrationEnabled && pathname === '/api/player/state' && request.method === 'POST') {
+          const body = parseJsonBody(await readRequestBody(request));
+          try {
+            bridge.updateState(body ?? {});
+            sendJson(response, 200, {ok: true});
+          } catch (error) {
+            if (error instanceof BridgeError) sendApiError(response, error.status, error.code);
+            else throw error;
+          }
+          return;
+        }
+
+        if (integrationEnabled && pathname === '/api/player/commands' && request.method === 'GET') {
+          try {
+            sendJson(response, 200, {commands: bridge.commands(parsedUrl.searchParams.get('session'))});
+          } catch (error) {
+            if (error instanceof BridgeError) sendApiError(response, error.status, error.code);
+            else throw error;
+          }
+          return;
+        }
+
+        if (integrationEnabled && pathname === '/api/player/ack' && request.method === 'POST') {
+          const body = parseJsonBody(await readRequestBody(request));
+          try {
+            bridge.acknowledge(body ?? {});
+            sendJson(response, 200, {ok: true});
+          } catch (error) {
+            if (error instanceof BridgeError) sendApiError(response, error.status, error.code);
+            else throw error;
+          }
           return;
         }
 
@@ -411,7 +535,11 @@ export function createProbeServer(options = {}) {
           // Starting a new login retires every previous exchange/refresh and
           // callback state. A late response from the old session must not
           // populate credentials for this one.
-          invalidate();
+          const retired = await invalidate({clearPersisted: integrationEnabled});
+          if (integrationEnabled && retired.hadRefreshToken && !retired.ok) {
+            sendApiError(response, 503, 'persistence_failed');
+            return;
+          }
           const pkce = createPkce();
           const state = randomBytes(32).toString('base64url');
           pendingStates.set(state, {
@@ -420,6 +548,10 @@ export function createProbeServer(options = {}) {
             verifier: pkce.verifier,
           });
           auth.clientId = body.clientId;
+          if (integrationEnabled && !bridge.saveClientId(auth.clientId)) {
+            sendApiError(response, 503, 'persistence_failed');
+            return;
+          }
           clearTokens();
           const authorizeUrl = new URL(AUTHORIZE_ENDPOINT);
           authorizeUrl.search = new URLSearchParams({
@@ -428,7 +560,7 @@ export function createProbeServer(options = {}) {
             code_challenge_method: 'S256',
             redirect_uri: configuredRedirectUri(server),
             response_type: 'code',
-            scope: AUTH_SCOPES,
+            scope: auth.scope,
             state,
           }).toString();
           sendJson(response, 200, { url: authorizeUrl.toString() });
@@ -462,12 +594,74 @@ export function createProbeServer(options = {}) {
         }
 
         if (pathname === '/api/logout' && request.method === 'POST') {
-          invalidate();
+          const invalidated = await invalidate({clearPersisted: integrationEnabled, bridgeCode: 'server_restarted'});
+          if (integrationEnabled && invalidated.hadRefreshToken && !invalidated.ok) {
+            sendApiError(response, 503, 'persistence_failed');
+            return;
+          }
           sendJson(response, 200, { ok: true });
           return;
         }
 
         sendApiError(response, 404, 'not_found');
+        return;
+      }
+
+      if (isBridge) {
+        try {
+          if (pathname === '/bridge/snapshot' && request.method === 'GET') {
+            sendJson(response, 200, bridge.snapshot());
+            return;
+          }
+
+          if (pathname === '/bridge/auth' && request.method === 'GET') {
+            const state = bridge.auth();
+            sendJson(response, 200, {
+              configured: Boolean(state.configured),
+              authenticated: Boolean(state.authenticated),
+            });
+            return;
+          }
+
+          if (pathname === '/bridge/token' && request.method === 'GET') {
+            await accessTokenForBridge();
+            sendJson(response, 200, {
+              access_token: auth.accessToken,
+              expires_in: Math.max(0, Math.ceil((auth.accessExpiresAt - now()) / 1_000)),
+              scope: auth.scope,
+            });
+            return;
+          }
+
+          if (pathname === '/bridge/command' && request.method === 'POST') {
+            const body = parseJsonBody(await readRequestBody(request));
+            await bridge.enqueue(body ?? {});
+            sendJson(response, 200, {ok: true});
+            return;
+          }
+
+          if (pathname === '/bridge/login' && request.method === 'POST') {
+            await readRequestBody(request);
+            const url = expectedOrigin(server, configuredPort) + '/';
+            sendJson(response, 200, await bridge.login(url));
+            return;
+          }
+
+          if (pathname === '/bridge/logout' && request.method === 'POST') {
+            await readRequestBody(request);
+            const invalidated = await invalidate({clearPersisted: true, bridgeCode: 'server_restarted'});
+            if (invalidated.hadRefreshToken && !invalidated.ok) {
+              sendApiError(response, 503, 'persistence_failed');
+              return;
+            }
+            sendJson(response, 200, {ok: true});
+            return;
+          }
+          sendApiError(response, 404, 'not_found');
+        } catch (error) {
+          if (error instanceof BridgeError) sendApiError(response, error.status, error.code);
+          else throw error;
+        }
         return;
       }
 
@@ -534,6 +728,8 @@ export function createProbeServer(options = {}) {
   server.requestTimeout = requestTimeoutMs;
   server.headersTimeout = requestTimeoutMs;
   server.keepAliveTimeout = Math.min(requestTimeoutMs, 5_000);
+  bridge.attachServer(server);
+  server.playerBridge = bridge;
   server.probe = Object.freeze({
     get auth() {
       return {
@@ -541,6 +737,9 @@ export function createProbeServer(options = {}) {
           Boolean(auth.refreshToken && auth.clientId),
         clientId: auth.clientId,
       };
+    },
+    get bridge() {
+      return bridge;
     },
     get pendingStateCount() {
       cleanupExpiredStates();

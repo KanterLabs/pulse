@@ -3,6 +3,7 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::struct_excessive_bools)]
 
+pub mod browser_player;
 pub mod cache;
 pub mod config;
 pub mod dbus_service;
@@ -12,6 +13,7 @@ pub mod mpris;
 pub mod paths;
 pub mod spotify;
 
+pub use browser_player::{BrowserAuthState, BrowserPlayer, BrowserToken};
 pub use cache::{ArtworkCache, CacheLimits, CacheRepository, CachedResponse, CachedSnapshot};
 pub use config::PulseConfig;
 pub use dbus_service::{

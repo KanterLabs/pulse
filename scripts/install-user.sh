@@ -16,6 +16,7 @@ NO_BUILD=${PULSE_SKIP_BUILD:-0}
 NO_START=${PULSE_NO_START:-0}
 ENABLE_EXTENSION=${PULSE_ENABLE_EXTENSION:-0}
 DRY_RUN=${PULSE_DRY_RUN:-0}
+INDEPENDENT_PLAYBACK=${PULSE_INDEPENDENT_PLAYBACK:-0}
 
 usage() {
     cat <<'EOF'
@@ -30,6 +31,7 @@ Options:
   --no-build            use an existing target artifact
   --no-start            install files without enabling/starting the daemon
   --enable-extension    activate a fresh install; upgrades require logout/login
+  --independent-playback install the headless Google Chrome audio helper
   --dry-run             print planned actions without writing or reloading
   -h, --help            show this help
 
@@ -59,6 +61,9 @@ while (($# > 0)); do
             ;;
         --enable-extension)
             ENABLE_EXTENSION=1
+            ;;
+        --independent-playback)
+            INDEPENDENT_PLAYBACK=1
             ;;
         --dry-run)
             DRY_RUN=1
@@ -93,6 +98,13 @@ BIN_DIR=$(pulse_bin_dir)
 EXTENSION_DIR=$(pulse_extension_dir)
 DBUS_DIR=$(pulse_dbus_service_dir)
 SYSTEMD_DIR=$(pulse_systemd_user_dir)
+# Preserve an existing independent-player installation on ordinary upgrades.
+[[ ! -f "$SYSTEMD_DIR/pulse-daemon.service.d/50-pulse-player.conf" ]] || INDEPENDENT_PLAYBACK=1
+# shellcheck source=player-install.bash
+source "$SCRIPT_DIR/player-install.bash"
+if [[ "$INDEPENDENT_PLAYBACK" -eq 1 && "$DRY_RUN" -eq 0 ]]; then
+    player_preflight
+fi
 BUILD_ROOT=$(pulse_build_root)
 if [[ "$BUILD_ROOT" != /* ]]; then
     BUILD_ROOT="$PULSE_REPO_ROOT/$BUILD_ROOT"
@@ -149,6 +161,9 @@ if [[ -e "$EXTENSION_DIR" || -L "$EXTENSION_DIR" ]]; then
 fi
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
+    if [[ "$INDEPENDENT_PLAYBACK" -eq 1 ]]; then
+        pulse_info 'would install the headless audio helper, verify a backup, and select the browser playback backend'
+    fi
     if [[ -n "${PULSE_DAEMON_BINARY:-}" ]]; then
         pulse_info "would install supplied daemon: $DAEMON_BINARY"
     else
@@ -350,6 +365,12 @@ atomic_install_rendered_file() {
 }
 
 disable_existing_extension
+if [[ "$INDEPENDENT_PLAYBACK" -eq 1 ]]; then
+    player_backup
+    if pulse_user_systemd_available && systemctl --user is-active --quiet pulse-player.service; then
+        systemctl --user stop pulse-player.service || pulse_die 'could not stop the audio helper before upgrading it'
+    fi
+fi
 mkdir -p -- "$BIN_DIR"
 pulse_install_file_atomic "$DAEMON_BINARY" "$BIN_DEST" 0755
 
@@ -361,11 +382,17 @@ fi
 
 atomic_install_rendered_file "$SYSTEMD_TEMPLATE" "$SYSTEMD_DEST" 0644
 atomic_install_rendered_file "$DBUS_TEMPLATE" "$DBUS_DEST" 0644
+if [[ "$INDEPENDENT_PLAYBACK" -eq 1 ]]; then
+    player_install
+fi
 
 pulse_reload_user_integration "$CONFIG_HOME" "$DATA_HOME" "$CACHE_HOME"
 
 if [[ "$NO_START" -eq 0 ]]; then
     if pulse_user_systemd_available; then
+        if [[ "$INDEPENDENT_PLAYBACK" -eq 1 ]]; then
+            systemctl --user enable --now pulse-player.service || pulse_die 'could not start Pulse background playback; inspect pulse-player.service'
+        fi
         if systemctl --user is-active --quiet "$(pulse_unit_name)"; then
             if systemctl --user restart "$(pulse_unit_name)"; then
                 pulse_info 'daemon restarted through systemd --user'
