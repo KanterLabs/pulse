@@ -24,7 +24,7 @@ env:
 jobs:
   metadata:
     name: Workspace metadata
-    runs-on: homelab
+    runs-on: homelab-tiny
     timeout-minutes: 10
     steps:
       - name: Check out source
