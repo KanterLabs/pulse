@@ -24,7 +24,7 @@ env:
 jobs:
   metadata:
     name: Workspace metadata
-    runs-on: homelab
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Check out source
@@ -32,12 +32,17 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+      - name: Set up the project Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: "stable"
+          components: rustfmt, clippy
       - name: Inspect Cargo metadata
         run: cargo metadata --no-deps --format-version 1
 
   rust-fmt:
     name: Rust format
-    runs-on: homelab
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Check out source
@@ -45,6 +50,15 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+      - name: Set up the project Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: "stable"
+          components: rustfmt, clippy
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: Check Rust toolchain
         run: |
           rustc --version
@@ -55,7 +69,7 @@ jobs:
 
   static:
     name: Shell and extension checks
-    runs-on: homelab
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Check out source
@@ -144,7 +158,7 @@ jobs:
 
   gnome-smoke:
     name: GNOME 49 native lifecycle
-    runs-on: homelab-heavy
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - name: Check out source
@@ -158,7 +172,7 @@ jobs:
 
   rust-clippy:
     name: Rust Clippy
-    runs-on: homelab-heavy
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - name: Check out source
@@ -166,6 +180,15 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+      - name: Set up the project Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: "stable"
+          components: rustfmt, clippy
+      - name: Install hosted native prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libglib2.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
         with:
@@ -185,7 +208,7 @@ jobs:
 
   rust-build:
     name: Rust workspace build
-    runs-on: homelab-heavy
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - name: Check out source
@@ -193,6 +216,15 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+      - name: Set up the project Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: "stable"
+          components: rustfmt, clippy
+      - name: Install hosted native prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libglib2.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
         with:
@@ -207,7 +239,7 @@ jobs:
 
   player-integration:
     name: Headless player and daemon integration
-    runs-on: homelab-heavy
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - name: Check out source
@@ -221,7 +253,7 @@ jobs:
 
   rust-test:
     name: Rust workspace tests
-    runs-on: homelab-heavy
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - name: Check out source
@@ -229,6 +261,15 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+      - name: Set up the project Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: "stable"
+          components: rustfmt, clippy
+      - name: Install hosted native prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libglib2.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
         with:
