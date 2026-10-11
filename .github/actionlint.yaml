@@ -1,4 +1,2 @@
 self-hosted-runner:
-  labels:
-    - homelab
-    - homelab-heavy
+  labels: []
